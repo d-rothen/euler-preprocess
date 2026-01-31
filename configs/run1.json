@@ -1,0 +1,82 @@
+{
+  "seed": 1337,
+  "depth_scale": 1.0,
+  "resize_depth": true,
+  "contrast_threshold": 0.05,
+  "device": "mps",
+  "gpu_batch_size": 4,
+  "output_jsonl": "foggy.jsonl",
+  "selection": {
+    "mode": "weighted",
+    "weights": {
+      "uniform": 1.0,
+      "heterogeneous_k": 0.0,
+      "heterogeneous_ls": 0.0,
+      "heterogeneous_k_ls": 0.0
+    }
+  },
+  "models": {
+    "uniform": {
+      "visibility_m": {
+        "dist": "normal",
+        "mean": 300.0,
+        "std": 100.0,
+        "min": 100.0
+      },
+      "atmospheric_light": "from_sky"
+    },
+    "heterogeneous_k": {
+      "visibility_m": {
+        "dist": "constant",
+        "value": 80.0
+      },
+      "atmospheric_light": "from_sky",
+      "k_hetero": {
+        "scales": "auto",
+        "min_scale": 2,
+        "max_scale": null,
+        "min_factor": 0.0,
+        "max_factor": 1.0,
+        "normalize_to_mean": true
+      }
+    },
+    "heterogeneous_ls": {
+      "visibility_m": {
+        "dist": "constant",
+        "value": 80.0
+      },
+      "atmospheric_light": "from_sky",
+      "ls_hetero": {
+        "scales": "auto",
+        "min_scale": 2,
+        "max_scale": null,
+        "min_factor": 0.0,
+        "max_factor": 1.0,
+        "normalize_to_mean": false
+      }
+    },
+    "heterogeneous_k_ls": {
+      "visibility_m": {
+        "dist": "constant",
+        "value": 80.0
+      },
+      "atmospheric_light": "from_sky",
+      "k_hetero": {
+        "scales": "auto",
+        "min_scale": 2,
+        "max_scale": null,
+        "min_factor": 0.0,
+        "max_factor": 1.0,
+        "normalize_to_mean": true
+      },
+      "ls_hetero": {
+        "scales": "auto",
+        "min_scale": 2,
+        "max_scale": null,
+        "min_factor": 0.0,
+        "max_factor": 1.0,
+        "normalize_to_mean": false
+      }
+    }
+  }
+}

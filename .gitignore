@@ -1,0 +1,6 @@
+.venv
+__pycache__
+.tmp
+.out
+UniDepth
+.vscode

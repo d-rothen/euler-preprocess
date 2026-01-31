@@ -1,0 +1,10 @@
+{
+  "fog_config_path": "src/fog/example_config.json",
+  "output_path": "/path/to/output",
+  "modalities": {
+    "rgb": "/path/to/vkitti_2.0.3_rgb",
+    "depth": "/path/to/vkitti_2.0.3_depth",
+    "classSegmentation": "/path/to/vkitti_2.0.3_classSegmentation"
+  },
+  "sky_color": [90, 200, 255]
+}
