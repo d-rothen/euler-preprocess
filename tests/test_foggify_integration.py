@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from src.fog.foggify import Foggify
-from src.fog.sky_mask import sky_mask_transform
+from euler_fog.fog.foggify import Foggify
+from euler_fog.fog.sky_mask import sky_mask_transform
 from typing import Any, Callable
 
 # ── Loaders (implement before running) ─────────────────────────────────────

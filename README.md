@@ -5,6 +5,7 @@ Physically-based fog augmentation for multi-modal image datasets. Takes aligned 
 ## Usage
 
 ```bash
+uv pip install "euler-fog[gpu,progress] @ git+https://github.com/d-rothen/euler-fog"
 python main.py --config configs/example_dataset_config.json
 ```
 

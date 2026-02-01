@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from src.fog.airlight_from_sky import AirlightFromSky
-from src.fog.foggify_logging import get_logger, log_config, progress_bar
+from euler_fog.fog.airlight_from_sky import AirlightFromSky
+from euler_fog.fog.foggify_logging import get_logger, log_config, progress_bar
 
 try:
     import torch
