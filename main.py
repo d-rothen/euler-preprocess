@@ -1,53 +1,24 @@
 """Main entry point for fog generation using euler-loading.
 
-Builds a MultiModalDataset from euler-loading, derives sky masks via a
+Builds a MultiModalDataset, derives sky masks via a dataset-specific
 transform, and feeds the samples into Foggify.
 
 Usage:
     python main.py --config path/to/config.json
 
-Example configuration:
-    {
-        "fog_config_path": "src/fog/example_config.json",
-        "output_path": "/path/to/output",
-        "modalities": {
-            "rgb": "/path/to/vkitti_2.0.3_rgb",
-            "depth": "/path/to/vkitti_2.0.3_depth",
-            "classSegmentation": "/path/to/vkitti_2.0.3_classSegmentation"
-        },
-        "sky_color": [90, 200, 255]
-    }
+The configuration JSON must contain at least ``fog_config_path``,
+``output_path``, and ``modalities``.  An optional ``dataset`` key selects
+which dataset builder to use (maps to a module under ``src/common/``).
+Configs without ``dataset`` fall back to the built-in vkitti2 loaders.
 """
 
 import argparse
+import importlib
 import json
 import sys
 
-import numpy as np
-from PIL import Image
-
-from euler_loading import Modality, MultiModalDataset
 from src.fog.foggify import Foggify
-from src.fog.sky_mask import sky_mask_transform
-
-
-# ---------------------------------------------------------------------------
-# Loader callables (one per modality)
-# ---------------------------------------------------------------------------
-
-def load_rgb(path: str) -> Image.Image:
-    """Load an RGB image as a PIL Image."""
-    return Image.open(path).convert("RGB")
-
-
-def load_depth(path: str) -> np.ndarray:
-    """Load a depth map as a float32 numpy array (values in meters)."""
-    return np.asarray(Image.open(path), dtype=np.float32)
-
-
-def load_class_segmentation(path: str) -> Image.Image:
-    """Load a segmentation image as a PIL Image."""
-    return Image.open(path).convert("RGB")
+from src.fog.foggify_logging import get_logger, log_dataset_info
 
 
 # ---------------------------------------------------------------------------
@@ -69,35 +40,71 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# Fallback dataset builder (vkitti2)
+# ---------------------------------------------------------------------------
+
+def _build_vkitti2_dataset(config: dict, use_gpu: bool):
+    """Build a MultiModalDataset using the built-in vkitti2 loaders."""
+    from euler_loading import Modality, MultiModalDataset
+    from src.fog.sky_mask import sky_mask_transform
+
+    if use_gpu:
+        from euler_loading.loaders.gpu import vkitti2 as loaders
+    else:
+        from euler_loading.loaders.cpu import vkitti2 as loaders
+
+    modality_paths = config["modalities"]
+    sky_color = config.get("sky_color", [90, 200, 255])
+
+    return MultiModalDataset(
+        modalities={
+            "rgb": Modality(modality_paths["rgb"], loader=loaders.rgb),
+            "depth": Modality(modality_paths["depth"], loader=loaders.depth),
+            "classSegmentation": Modality(
+                modality_paths["classSegmentation"],
+                loader=loaders.class_segmentation,
+            ),
+        },
+        transforms=[sky_mask_transform(sky_color)],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     args = parse_args()
+    logger = get_logger()
 
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
     fog_config_path = config["fog_config_path"]
     output_path = config["output_path"]
+    dataset_name = config.get("dataset")
     modality_paths = config["modalities"]
-    sky_color = config.get("sky_color", [90, 200, 255])
 
-    print(f"Loading configuration from: {args.config}")
-    print(f"Fog config: {fog_config_path}")
-    print(f"Output path: {output_path}")
+    # Read the fog config to determine the device
+    with open(fog_config_path, "r", encoding="utf-8") as f:
+        fog_cfg = json.load(f)
+    device = fog_cfg.get("device", "cpu").lower()
+    use_gpu = device not in ("cpu",)
 
-    # Build euler-loading dataset
-    dataset = MultiModalDataset(
-        modalities={
-            "rgb": Modality(modality_paths["rgb"], loader=load_rgb),
-            "depth": Modality(modality_paths["depth"], loader=load_depth),
-            "classSegmentation": Modality(
-                modality_paths["classSegmentation"],
-                loader=load_class_segmentation,
-            ),
-        },
-        transforms=[sky_mask_transform(sky_color)],
-    )
+    logger.info("Config: %s", args.config)
+    logger.info("Fog config: %s", fog_config_path)
+    logger.info("Output path: %s", output_path)
 
-    print(f"Dataset size: {len(dataset)} samples")
+    # Build dataset via the named module or fall back to vkitti2
+    if dataset_name:
+        module = importlib.import_module(f"src.common.{dataset_name}")
+        dataset = module.build_dataset(config, use_gpu)
+    else:
+        dataset_name = "vkitti2"
+        dataset = _build_vkitti2_dataset(config, use_gpu)
+
+    log_dataset_info(logger, dataset_name, len(dataset), modality_paths, use_gpu)
 
     foggify = Foggify(
         config_path=fog_config_path,
@@ -106,7 +113,7 @@ def main() -> int:
 
     saved_paths = foggify.generate_fog(dataset)
 
-    print(f"\nFog generation complete. Generated {len(saved_paths)} images.")
+    logger.info("Fog generation complete. Generated %d images.", len(saved_paths))
     return 0
 
 

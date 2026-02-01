@@ -3,16 +3,34 @@
 Provides a transform function compatible with euler-loading's
 MultiModalDataset that derives a boolean sky_mask from a segmentation
 modality.
+
+Handles both CPU-format (numpy HWC) and GPU-format (torch CHW) inputs.
 """
 
 import numpy as np
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+
+def _seg_to_numpy_hwc(seg) -> np.ndarray:
+    """Convert a segmentation array/tensor to numpy (H, W, 3)."""
+    if torch is not None and torch.is_tensor(seg):
+        seg = seg.detach().cpu().numpy()
+    seg = np.asarray(seg)
+    # CHW → HWC when first dim is small (channel) and spatial dims are large
+    if seg.ndim == 3 and seg.shape[0] in (1, 3, 4) and seg.shape[1] > 4 and seg.shape[2] > 4:
+        seg = np.transpose(seg, (1, 2, 0))
+    return seg
 
 
 def make_sky_mask(segmentation: np.ndarray, sky_color: list[int]) -> np.ndarray:
     """Create a boolean sky mask from a segmentation image.
 
     Args:
-        segmentation: Segmentation image, shape (H, W, 3), uint8.
+        segmentation: Segmentation image, shape (H, W, 3).
         sky_color: RGB color identifying sky pixels, e.g. [90, 200, 255].
 
     Returns:
@@ -41,7 +59,7 @@ def sky_mask_transform(sky_color: list[int]):
 
     def _transform(sample: dict) -> dict:
         sample["sky_mask"] = make_sky_mask(
-            np.asarray(sample["classSegmentation"]), sky_color
+            _seg_to_numpy_hwc(sample["classSegmentation"]), sky_color
         )
         return sample
 

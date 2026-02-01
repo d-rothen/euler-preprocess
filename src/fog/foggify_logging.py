@@ -64,6 +64,19 @@ def log_config(
             logger.info("Model fixed: %s", selection.get("model", "uniform"))
 
 
+def log_dataset_info(
+    logger: logging.Logger,
+    dataset_name: str,
+    dataset_size: int,
+    modality_paths: dict[str, str],
+    use_gpu: bool,
+) -> None:
+    logger.info("Dataset: %s (%d samples)", dataset_name, dataset_size)
+    logger.info("Loader variant: %s", "gpu" if use_gpu else "cpu")
+    for name, path in modality_paths.items():
+        logger.info("  modality '%s': %s", name, path)
+
+
 @contextmanager
 def progress_bar(
     total: int, desc: str, logger: logging.Logger

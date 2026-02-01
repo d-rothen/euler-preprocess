@@ -521,8 +521,27 @@ def apply_model(
     return apply_fog(rgb, depth_m, k_field, ls_field), k_mean, ls_base
 
 
-def normalize_rgb(image: np.ndarray) -> np.ndarray:
-    image = np.asarray(image)
+def _is_chw(arr: np.ndarray) -> bool:
+    """Heuristic: 3-D array is CHW when first dim is small and spatial dims are large."""
+    return (
+        arr.ndim == 3
+        and arr.shape[0] in (1, 3, 4)
+        and arr.shape[1] > 4
+        and arr.shape[2] > 4
+    )
+
+
+def _to_numpy(data) -> np.ndarray:
+    """Convert *data* (numpy, torch tensor, or PIL Image) to a numpy array."""
+    if torch is not None and torch.is_tensor(data):
+        return data.detach().cpu().numpy()
+    return np.asarray(data)
+
+
+def normalize_rgb(image) -> np.ndarray:
+    image = _to_numpy(image)
+    if _is_chw(image):
+        image = np.transpose(image, (1, 2, 0))
     if image.ndim == 2:
         image = np.stack([image, image, image], axis=-1)
     elif image.ndim == 3 and image.shape[-1] == 4:
@@ -533,27 +552,37 @@ def normalize_rgb(image: np.ndarray) -> np.ndarray:
     return np.clip(image, 0.0, 1.0)
 
 
-def normalize_rgb_torch(image: np.ndarray, device: "torch.device") -> "torch.Tensor":
-    image_np = np.asarray(image)
-    image_t = torch.from_numpy(image_np).to(device)
+def normalize_rgb_torch(image, device: "torch.device") -> "torch.Tensor":
+    if torch.is_tensor(image):
+        image_t = image.to(device=device, dtype=torch.float32)
+        # CHW → HWC
+        if image_t.ndim == 3 and image_t.shape[0] in (1, 3, 4) and image_t.shape[2] > 4:
+            image_t = image_t.permute(1, 2, 0)
+        is_int = not image_t.is_floating_point()
+    else:
+        image_np = np.asarray(image)
+        is_int = np.issubdtype(image_np.dtype, np.integer)
+        image_t = torch.from_numpy(image_np).to(device)
     if image_t.ndim == 2:
         image_t = image_t.unsqueeze(-1).repeat(1, 1, 3)
     elif image_t.ndim == 3 and image_t.shape[-1] == 4:
         image_t = image_t[..., :3]
     image_t = image_t.to(torch.float32)
-    if np.issubdtype(image_np.dtype, np.integer):
+    if is_int:
         image_t = image_t / 255.0
     else:
-        max_val = float(image_np.max()) if image_np.size else 0.0
-        if max_val > 1.0:
+        if float(image_t.max()) > 1.0:
             image_t = image_t / 255.0
     return torch.clamp(image_t, 0.0, 1.0)
 
 
 def normalize_depth(
-    depth: np.ndarray, target_shape: tuple[int, int], resize_depth_flag: bool
+    depth, target_shape: tuple[int, int], resize_depth_flag: bool
 ) -> np.ndarray:
-    depth = np.asarray(depth, dtype=np.float32)
+    depth = _to_numpy(depth).astype(np.float32)
+    # (1, H, W) → (H, W)  (GPU-loader channel-first format)
+    if depth.ndim == 3 and depth.shape[0] == 1:
+        depth = depth[0]
     if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
     if resize_depth_flag and depth.shape != target_shape:
@@ -832,7 +861,9 @@ class Foggify:
             for batch in self._iter_batches(indexed_samples, self.gpu_batch_size):
                 items: list[dict] = []
                 for global_index, sample in batch:
-                    rgb = np.asarray(sample["rgb"])
+                    rgb = _to_numpy(sample["rgb"])
+                    if _is_chw(rgb):
+                        rgb = np.transpose(rgb, (1, 2, 0))
                     depth = normalize_depth(
                         sample["depth"], rgb.shape[:2], self.resize_depth_flag
                     )
