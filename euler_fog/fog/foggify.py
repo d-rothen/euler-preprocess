@@ -636,6 +636,12 @@ class Foggify:
         "depth":    np.ndarray (H, W), float in meters
         "sky_mask": np.ndarray (H, W), boolean
         "id":       str
+
+    Optional:
+        "full_id":  str – hierarchical id from euler-loading (e.g.
+                    "/Scene02/30-deg-right/Camera_0/00000").  When present,
+                    the parent segments are used as subdirectories under the
+                    model output folder so the dataset structure is preserved.
     """
 
     def __init__(
@@ -781,7 +787,8 @@ class Foggify:
                 )
 
                 output_path = self._build_output_path(
-                    sample["id"], model_name, beta, airlight
+                    sample["id"], model_name, beta, airlight,
+                    full_id=sample.get("full_id"),
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 save_image(output_path, foggy)
@@ -904,6 +911,7 @@ class Foggify:
                     items.append(
                         {
                             "sample_id": sample["id"],
+                            "full_id": sample.get("full_id"),
                             "rgb": rgb,
                             "depth": depth,
                             "sky_mask": sample["sky_mask"],
@@ -1040,6 +1048,7 @@ class Foggify:
                                 item["model_name"],
                                 k_means[idx],
                                 airlight_np,
+                                full_id=item.get("full_id"),
                             )
                             output_path.parent.mkdir(parents=True, exist_ok=True)
                             save_image(output_path, foggy_img)
@@ -1077,6 +1086,7 @@ class Foggify:
                             item["model_name"],
                             beta,
                             airlight_np,
+                            full_id=item.get("full_id"),
                         )
                         output_path.parent.mkdir(parents=True, exist_ok=True)
                         save_image(output_path, foggy_img)
@@ -1091,7 +1101,12 @@ class Foggify:
         return saved_paths
 
     def _build_output_path(
-        self, sample_id: str, model_name: str, beta: float, airlight: np.ndarray
+        self,
+        sample_id: str,
+        model_name: str,
+        beta: float,
+        airlight: np.ndarray,
+        full_id: str | None = None,
     ) -> Path:
         if self.suffix:
             filename = f"{sample_id}_{self.suffix}.png"
@@ -1101,7 +1116,14 @@ class Foggify:
             filename = (
                 f"beta_{beta_str}_airlight_{r_str}_{g_str}_{b_str}_rgb_{sample_id}.png"
             )
-        return self.out_path / model_name / filename
+        base = self.out_path / model_name
+        if full_id:
+            # full_id is e.g. "/Scene02/30-deg-right/Camera_0/00000"
+            # Use all segments except the last (the frame id) as subdirs.
+            parts = [p for p in full_id.split("/") if p]
+            if len(parts) > 1:
+                base = base.joinpath(*parts[:-1])
+        return base / filename
 
     def _write_model_config(
         self, model_name: str, model_cfg: dict, saved_paths: list

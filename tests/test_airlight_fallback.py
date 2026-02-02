@@ -203,3 +203,97 @@ class TestFoggifyEmptySkyMask:
         # Warning was logged
         assert any("No sky pixels" in msg for msg in caplog.messages)
         assert any("nosky_001" in msg for msg in caplog.messages)
+
+
+# ---------------------------------------------------------------------------
+# Output path hierarchy via full_id
+# ---------------------------------------------------------------------------
+
+
+class TestFoggifyOutputHierarchy:
+    @pytest.fixture
+    def fog_config(self, tmp_path):
+        cfg = {
+            "device": "cpu",
+            "models": {
+                "uniform": {
+                    "visibility_m": {"dist": "constant", "value": 200.0},
+                    "atmospheric_light": "from_sky",
+                },
+            },
+            "selection": {"mode": "fixed", "model": "uniform"},
+            "seed": 42,
+        }
+        path = tmp_path / "fog_cfg.json"
+        path.write_text(json.dumps(cfg))
+        return path
+
+    def _make_sample(self, sample_id, full_id=None):
+        rng = np.random.default_rng(0)
+        h, w = 64, 64
+        sample = {
+            "rgb": rng.random((h, w, 3)).astype(np.float32),
+            "depth": rng.uniform(1.0, 50.0, (h, w)).astype(np.float32),
+            "sky_mask": np.ones((h, w), dtype=bool),
+            "id": sample_id,
+        }
+        if full_id is not None:
+            sample["full_id"] = full_id
+        return sample
+
+    def test_full_id_creates_subdirectories(self, tmp_path, fog_config):
+        out_dir = tmp_path / "output"
+        foggify = Foggify(config_path=str(fog_config), out_path=str(out_dir))
+
+        samples = [
+            self._make_sample("00042", full_id="/Scene02/30-deg-right/Camera_0/00042"),
+        ]
+        paths = foggify.generate_fog(samples)
+
+        assert len(paths) == 1
+        # The output should be under model_name/Scene02/30-deg-right/Camera_0/
+        rel = paths[0].relative_to(out_dir / "uniform")
+        assert rel.parts[:-1] == ("Scene02", "30-deg-right", "Camera_0")
+        assert paths[0].exists()
+
+    def test_no_full_id_stays_flat(self, tmp_path, fog_config):
+        out_dir = tmp_path / "output"
+        foggify = Foggify(config_path=str(fog_config), out_path=str(out_dir))
+
+        samples = [self._make_sample("00001")]
+        paths = foggify.generate_fog(samples)
+
+        assert len(paths) == 1
+        # Should be directly under model_name/ with no extra subdirs
+        rel = paths[0].relative_to(out_dir / "uniform")
+        assert len(rel.parts) == 1  # just the filename
+        assert paths[0].exists()
+
+    def test_single_segment_full_id_stays_flat(self, tmp_path, fog_config):
+        """full_id with only one segment (just the frame id) should not add subdirs."""
+        out_dir = tmp_path / "output"
+        foggify = Foggify(config_path=str(fog_config), out_path=str(out_dir))
+
+        samples = [self._make_sample("00005", full_id="/00005")]
+        paths = foggify.generate_fog(samples)
+
+        assert len(paths) == 1
+        rel = paths[0].relative_to(out_dir / "uniform")
+        assert len(rel.parts) == 1
+        assert paths[0].exists()
+
+    def test_multiple_samples_different_hierarchies(self, tmp_path, fog_config):
+        out_dir = tmp_path / "output"
+        foggify = Foggify(config_path=str(fog_config), out_path=str(out_dir))
+
+        samples = [
+            self._make_sample("00001", full_id="/SceneA/clone/Camera_0/00001"),
+            self._make_sample("00002", full_id="/SceneB/fog/Camera_1/00002"),
+        ]
+        paths = foggify.generate_fog(samples)
+
+        assert len(paths) == 2
+        rel_a = paths[0].relative_to(out_dir / "uniform")
+        rel_b = paths[1].relative_to(out_dir / "uniform")
+        assert rel_a.parts[:-1] == ("SceneA", "clone", "Camera_0")
+        assert rel_b.parts[:-1] == ("SceneB", "fog", "Camera_1")
