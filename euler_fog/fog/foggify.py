@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import math
 from collections.abc import Iterable
@@ -6,8 +8,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+import logging
+
 from euler_fog.fog.airlight_from_sky import AirlightFromSky
 from euler_fog.fog.foggify_logging import get_logger, log_config, progress_bar
+
+_torch_logger = logging.getLogger("foggify")
 
 try:
     import torch
@@ -328,10 +334,30 @@ def normalize_atmospheric_light_torch(value: "torch.Tensor") -> "torch.Tensor":
 
 
 def estimate_airlight_torch(
-    image: "torch.Tensor", sky_mask: "torch.Tensor"
+    image: "torch.Tensor",
+    sky_mask: "torch.Tensor",
+    sample_id: str | None = None,
 ) -> "torch.Tensor":
+    if sky_mask.sum() == 0:
+        id_str = f" (sample {sample_id})" if sample_id else ""
+        _torch_logger.warning(
+            "No sky pixels in segmentation mask%s; "
+            "using default airlight fallback [1.0, 1.0, 1.0]",
+            id_str,
+        )
+        return torch.ones(3, device=image.device, dtype=image.dtype)
     airlight_pixels = image[sky_mask]
-    return airlight_pixels.mean(dim=0)
+    airlight = airlight_pixels.mean(dim=0)
+    if not torch.all(torch.isfinite(airlight)):
+        id_str = f" (sample {sample_id})" if sample_id else ""
+        _torch_logger.warning(
+            "Airlight estimated from sky pixels contains non-finite values "
+            "(%s)%s; using default airlight fallback [1.0, 1.0, 1.0]",
+            airlight.tolist(),
+            id_str,
+        )
+        return torch.ones(3, device=image.device, dtype=image.dtype)
+    return airlight
 
 
 def resolve_scales(
@@ -732,7 +758,7 @@ class Foggify:
                 depth = np.maximum(depth, 0.0)
 
                 estimated_airlight = self.airlight_estimator.estimate_airlight(
-                    rgb, sample["sky_mask"]
+                    rgb, sample["sky_mask"], sample_id=sample.get("id")
                 )
 
                 if self.seed is not None:
@@ -942,9 +968,23 @@ class Foggify:
                                 dim=0,
                             ).to(torch.float32)
                             mask_sum = sky_mask_batch.sum(dim=(1, 2))
+                            no_sky = mask_sum == 0
+                            safe_sum = mask_sum.clone()
+                            safe_sum[no_sky] = 1.0  # avoid division by zero
                             airlight = (
                                 rgb_batch * sky_mask_batch[..., None]
-                            ).sum(dim=(1, 2)) / mask_sum[:, None]
+                            ).sum(dim=(1, 2)) / safe_sum[:, None]
+                            # Replace NaN rows (no sky) with white fallback
+                            if no_sky.any():
+                                for idx_ns in no_sky.nonzero(as_tuple=False):
+                                    i = int(idx_ns.item())
+                                    self.logger.warning(
+                                        "No sky pixels in segmentation mask "
+                                        "(sample %s); using default airlight "
+                                        "fallback [1.0, 1.0, 1.0]",
+                                        uniform_items[i]["sample_id"],
+                                    )
+                                airlight[no_sky] = 1.0
                             ls_base = normalize_atmospheric_light_torch(airlight)
                         else:
                             ls_values = []
@@ -1018,7 +1058,7 @@ class Foggify:
                             torch.from_numpy(item["sky_mask"]).to(device).bool()
                         )
                         estimated_airlight = estimate_airlight_torch(
-                            rgb_t, sky_mask_t
+                            rgb_t, sky_mask_t, sample_id=item["sample_id"]
                         )
                         torch_gen = self._torch_generator_for_index(item["index"])
                         foggy_t, beta, airlight_t = self._apply_model_torch(
