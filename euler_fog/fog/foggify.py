@@ -750,11 +750,11 @@ class Foggify:
         return gen
 
     def _generate_fog_cpu(self, samples: Iterable[dict]) -> list[Path]:
-        sample_list = list(samples)
+        total = len(samples)  # type: ignore[arg-type]
         saved_paths: list[Path] = []
 
-        with progress_bar(len(sample_list), "CPU", self.logger) as bar:
-            for index, sample in enumerate(sample_list):
+        with progress_bar(total, "CPU", self.logger) as bar:
+            for index, sample in enumerate(samples):
                 rgb = normalize_rgb(sample["rgb"])
 
                 depth = normalize_depth(
@@ -884,14 +884,11 @@ class Foggify:
         if torch is None or self.torch_device is None:
             raise RuntimeError("Torch device not configured for GPU execution.")
         device = self.torch_device
-        sample_list = list(samples)
+        total = len(samples)  # type: ignore[arg-type]
         saved_paths: list[Path] = []
 
-        # Build indexed list for proper seeding across batches
-        indexed_samples = list(enumerate(sample_list))
-
-        with progress_bar(len(sample_list), "GPU", self.logger) as bar:
-            for batch in self._iter_batches(indexed_samples, self.gpu_batch_size):
+        with progress_bar(total, "GPU", self.logger) as bar:
+            for batch in self._iter_batches(enumerate(samples), self.gpu_batch_size):
                 items: list[dict] = []
                 for global_index, sample in batch:
                     rgb = _to_numpy(sample["rgb"])
