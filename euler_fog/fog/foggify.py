@@ -730,11 +730,17 @@ class Foggify:
         self.use_gpu = torch_device.type != "cpu"
 
     @staticmethod
-    def _iter_batches(items: list, batch_size: int):
+    def _iter_batches(items: Iterable, batch_size: int):
         if batch_size <= 0:
             batch_size = 1
-        for start in range(0, len(items), batch_size):
-            yield items[start : start + batch_size]
+        batch: list = []
+        for item in items:
+            batch.append(item)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def _torch_generator_for_index(self, index: int) -> "torch.Generator":
         if self.torch_device is None:
