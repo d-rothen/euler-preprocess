@@ -420,6 +420,56 @@ def modulate_with_noise_torch(
     return mean_value * factors[..., None]
 
 
+def planar_to_radial_depth(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """Convert planar (z-buffer) depth to radial (Euclidean) depth.
+
+    For each pixel ``(u, v)`` the radial distance equals
+    ``depth[v, u] * sqrt(((u - cx)/fx)**2 + ((v - cy)/fy)**2 + 1)``.
+
+    Args:
+        depth: ``(H, W)`` float32 planar depth in metres.
+        K: ``(3, 3)`` float32 camera intrinsics matrix.
+
+    Returns:
+        ``(H, W)`` float32 radial depth in metres.
+    """
+    H, W = depth.shape
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    u = np.arange(W, dtype=np.float32)
+    v = np.arange(H, dtype=np.float32)
+    u_grid, v_grid = np.meshgrid(u, v)
+    factor = np.sqrt(((u_grid - cx) / fx) ** 2 + ((v_grid - cy) / fy) ** 2 + 1.0)
+    return depth * factor
+
+
+def planar_to_radial_depth_torch(
+    depth: "torch.Tensor", K: "torch.Tensor",
+) -> "torch.Tensor":
+    """Torch version of :func:`planar_to_radial_depth`.
+
+    Args:
+        depth: ``(H, W)`` or ``(B, H, W)`` float32 planar depth.
+        K: ``(3, 3)`` float32 intrinsics matrix (single, shared across batch).
+
+    Returns:
+        Same shape as *depth*, converted to radial depth.
+    """
+    if depth.ndim == 3:
+        H, W = depth.shape[1], depth.shape[2]
+    else:
+        H, W = depth.shape
+    fx = K[0, 0]
+    fy = K[1, 1]
+    cx = K[0, 2]
+    cy = K[1, 2]
+    u = torch.arange(W, device=depth.device, dtype=depth.dtype)
+    v = torch.arange(H, device=depth.device, dtype=depth.dtype)
+    v_grid, u_grid = torch.meshgrid(v, u, indexing="ij")
+    factor = torch.sqrt(((u_grid - cx) / fx) ** 2 + ((v_grid - cy) / fy) ** 2 + 1.0)
+    return depth * factor
+
+
 def apply_fog(
     rgb: np.ndarray, depth_m: np.ndarray, k_field: np.ndarray, ls_field: np.ndarray
 ) -> np.ndarray:
@@ -622,6 +672,21 @@ def normalize_depth(
     return depth
 
 
+def _extract_intrinsics(sample: dict) -> np.ndarray | None:
+    """Extract the 3x3 intrinsics matrix from a sample dict.
+
+    Hierarchical modalities are stored as ``sample[name][file_id]``.
+    For intrinsics the convention is ``sample["intrinsics"]["intrinsics"]``.
+    """
+    intr_dict = sample.get("intrinsics")
+    if intr_dict is None:
+        return None
+    raw = intr_dict.get("intrinsics") if isinstance(intr_dict, dict) else intr_dict
+    if raw is None:
+        return None
+    return _to_numpy(raw).astype(np.float32)
+
+
 def format_value(value: float) -> str:
     text = f"{value:.4f}".rstrip("0").rstrip(".")
     return text or "0"
@@ -632,10 +697,14 @@ class Foggify:
 
     Accepts an iterable of sample dicts (compatible with euler-loading's
     MultiModalDataset). Each sample must contain at minimum:
-        "rgb":      np.ndarray (H, W, 3)
-        "depth":    np.ndarray (H, W), float in meters
-        "sky_mask": np.ndarray (H, W), boolean
-        "id":       str
+        "rgb":        np.ndarray (H, W, 3)
+        "depth":      np.ndarray (H, W), float in meters
+        "sky_mask":   np.ndarray (H, W), boolean
+        "id":         str
+        "intrinsics": dict – hierarchical modality containing ``"intrinsics"``
+                      key mapping to a (3, 3) camera intrinsics matrix *K*.
+                      When present, planar (z-buffer) depth is converted to
+                      radial (Euclidean) depth before fog is applied.
 
     Optional:
         "full_id":  str – hierarchical id from euler-loading (e.g.
@@ -768,6 +837,10 @@ class Foggify:
                 )
                 depth = depth * self.depth_scale
                 depth = np.maximum(depth, 0.0)
+
+                intrinsics = _extract_intrinsics(sample)
+                if intrinsics is not None:
+                    depth = planar_to_radial_depth(depth, intrinsics)
 
                 estimated_airlight = self.airlight_estimator.estimate_airlight(
                     rgb, sample["sky_mask"], sample_id=sample.get("id")
@@ -903,6 +976,7 @@ class Foggify:
                     depth = normalize_depth(
                         sample["depth"], rgb.shape[:2], self.resize_depth_flag
                     )
+                    intrinsics = _extract_intrinsics(sample)
                     if self.seed is not None:
                         rng = np.random.default_rng(
                             np.random.SeedSequence([self.seed, global_index])
@@ -917,6 +991,7 @@ class Foggify:
                             "full_id": sample.get("full_id"),
                             "rgb": rgb,
                             "depth": depth,
+                            "intrinsics": intrinsics,
                             "sky_mask": sample["sky_mask"],
                             "rng": rng,
                             "model_name": model_name,
@@ -965,6 +1040,16 @@ class Foggify:
                         depth_batch = torch.clamp(
                             depth_batch * self.depth_scale, min=0.0
                         )
+
+                        # Planar → radial depth using intrinsics
+                        K_np = uniform_items[0].get("intrinsics")
+                        if K_np is not None:
+                            K_t = torch.from_numpy(K_np).to(
+                                device=device, dtype=torch.float32,
+                            )
+                            depth_batch = planar_to_radial_depth_torch(
+                                depth_batch, K_t,
+                            )
 
                         # Resolve atmospheric_light per the model config
                         al_spec = uniform_items[0]["model_cfg"].get(
@@ -1066,6 +1151,12 @@ class Foggify:
                             device=device, dtype=torch.float32
                         )
                         depth_t = torch.clamp(depth_t * self.depth_scale, min=0.0)
+                        K_np = item.get("intrinsics")
+                        if K_np is not None:
+                            K_t = torch.from_numpy(K_np).to(
+                                device=device, dtype=torch.float32,
+                            )
+                            depth_t = planar_to_radial_depth_torch(depth_t, K_t)
                         sky_mask_t = (
                             torch.from_numpy(item["sky_mask"]).to(device).bool()
                         )

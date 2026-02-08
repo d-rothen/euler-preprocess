@@ -57,6 +57,12 @@ def _build_vkitti2_dataset(config: dict, use_gpu: bool):
                 loader=loaders.class_segmentation,
             ),
         },
+        hierarchical_modalities={
+            "intrinsics": Modality(
+                modality_paths["intrinsics"],
+                loader=loaders.read_intrinsics,
+            ),
+        },
         transforms=[sky_mask_transform(sky_color)],
     )
 

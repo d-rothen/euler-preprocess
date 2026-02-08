@@ -4,7 +4,8 @@
   "modalities": {
     "rgb": "/path/to/vkitti_2.0.3_rgb",
     "depth": "/path/to/vkitti_2.0.3_depth",
-    "classSegmentation": "/path/to/vkitti_2.0.3_classSegmentation"
+    "classSegmentation": "/path/to/vkitti_2.0.3_classSegmentation",
+    "intrinsics": "/path/to/vkitti_2.0.3_intrinsics"
   },
   "sky_color": [90, 200, 255]
 }

@@ -9,8 +9,11 @@ Dataset config keys
 modalities.rgb              Path to RGB images (RGBA PNGs).
 modalities.depth            Path to depth maps (``.npz``, metres).
 modalities.classSegmentation  Path to semantic segmentation PNGs.
+modalities.intrinsics       Path to calibration JSONs (hierarchical, per-scene).
 sky_class_id                Integer class ID that represents sky (default 29).
 """
+
+import json
 
 import numpy as np
 
@@ -22,6 +25,26 @@ except ImportError:
     torch = None
 
 SKY_CLASS_ID = 29
+
+
+# ---------------------------------------------------------------------------
+# CPU intrinsics loader (numpy-only, no torch dependency)
+# ---------------------------------------------------------------------------
+
+def _read_intrinsics_numpy(path: str, meta=None) -> np.ndarray:
+    """Load the CS_FRONT intrinsics from a Real Drive Sim calibration JSON.
+
+    Returns a ``(3, 3)`` float32 camera-intrinsics matrix.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    intr = dict(zip(data["names"], data["intrinsics"]))["CS_FRONT"]
+    fx, fy = intr["fx"], intr["fy"]
+    cx, cy = intr["cx"], intr["cy"]
+    s = intr["skew"]
+    return np.array(
+        [[fx, s, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +80,10 @@ def build_dataset(config: dict, use_gpu: bool) -> MultiModalDataset:
     """Build a :class:`MultiModalDataset` for the real-drive-sim dataset."""
     if use_gpu:
         from euler_loading.loaders.gpu import real_drive_sim as loaders
+        intrinsics_loader = loaders.read_intrinsics
     else:
         from euler_loading.loaders.cpu import real_drive_sim as loaders
+        intrinsics_loader = _read_intrinsics_numpy
 
     modality_paths = config["modalities"]
     sky_class_id = config.get("sky_class_id", SKY_CLASS_ID)
@@ -70,6 +95,11 @@ def build_dataset(config: dict, use_gpu: bool) -> MultiModalDataset:
             "classSegmentation": Modality(
                 modality_paths["classSegmentation"],
                 loader=loaders.class_segmentation,
+            ),
+        },
+        hierarchical_modalities={
+            "intrinsics": Modality(
+                modality_paths["intrinsics"], loader=intrinsics_loader,
             ),
         },
         transforms=[_sky_mask_transform(sky_class_id)],

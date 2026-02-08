@@ -5,7 +5,8 @@
   "modalities": {
     "rgb": "/Volumes/Volume/Datasets/real-drive-sim/rgb",
     "depth": "/Volumes/Volume/Datasets/real-drive-sim/depth",
-    "classSegmentation": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d"
+    "classSegmentation": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d",
+    "intrinsics": "/Volumes/Volume/Datasets/real-drive-sim/calibration"
   },
   "sky_class_id": 29
 }
