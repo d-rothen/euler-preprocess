@@ -5,9 +5,7 @@ script.
 """
 
 import argparse
-import importlib
 import json
-import sys
 from pathlib import Path
 
 from euler_fog.fog.foggify import Foggify
@@ -32,38 +30,41 @@ def parse_args() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# Fallback dataset builder (vkitti2)
+# Generic dataset builder
 # ---------------------------------------------------------------------------
 
-def _build_vkitti2_dataset(config: dict, use_gpu: bool):
-    """Build a MultiModalDataset using the built-in vkitti2 loaders."""
+_REQUIRED_MODALITIES = {"rgb", "depth", "sky_mask"}
+
+
+def _build_dataset(config: dict):
+    """Build a MultiModalDataset from the config.
+
+    Modality loaders are resolved automatically by euler-loading from the
+    ``euler_loading`` properties in each modality's ds-crawler index.  No
+    dataset-specific loader selection is required.
+    """
     from euler_loading import Modality, MultiModalDataset
-    from euler_fog.fog.sky_mask import sky_mask_transform
 
-    if use_gpu:
-        from euler_loading.loaders.gpu import vkitti2 as loaders
-    else:
-        from euler_loading.loaders.cpu import vkitti2 as loaders
+    modality_paths = config.get("modalities", {})
+    hierarchical_paths = config.get("hierarchical_modalities", {})
 
-    modality_paths = config["modalities"]
-    sky_color = config.get("sky_color", [90, 200, 255])
+    missing = _REQUIRED_MODALITIES - modality_paths.keys()
+    if missing:
+        raise ValueError(
+            f"Missing required modalities in config: {', '.join(sorted(missing))}. "
+            f"'modalities' must contain at least: {', '.join(sorted(_REQUIRED_MODALITIES))}"
+        )
+
+    modalities = {
+        name: Modality(path) for name, path in modality_paths.items()
+    }
+    hierarchical_modalities = {
+        name: Modality(path) for name, path in hierarchical_paths.items()
+    } or None
 
     return MultiModalDataset(
-        modalities={
-            "rgb": Modality(modality_paths["rgb"], loader=loaders.rgb),
-            "depth": Modality(modality_paths["depth"], loader=loaders.depth),
-            "classSegmentation": Modality(
-                modality_paths["classSegmentation"],
-                loader=loaders.class_segmentation,
-            ),
-        },
-        hierarchical_modalities={
-            "intrinsics": Modality(
-                modality_paths["intrinsics"],
-                loader=loaders.read_intrinsics,
-            ),
-        },
-        transforms=[sky_mask_transform(sky_color)],
+        modalities=modalities,
+        hierarchical_modalities=hierarchical_modalities,
     )
 
 
@@ -91,8 +92,6 @@ def main() -> int:
 
     fog_config_path = _resolve(config["fog_config_path"], config_dir)
     output_path = config["output_path"]
-    dataset_name = config.get("dataset")
-    modality_paths = config["modalities"]
 
     # Read the fog config to determine the device
     with open(fog_config_path, "r", encoding="utf-8") as f:
@@ -104,14 +103,13 @@ def main() -> int:
     logger.info("Fog config: %s", fog_config_path)
     logger.info("Output path: %s", output_path)
 
-    # Build dataset via the named module or fall back to vkitti2
-    if dataset_name:
-        module = importlib.import_module(f"euler_fog.common.{dataset_name}")
-        dataset = module.build_dataset(config, use_gpu)
-    else:
-        dataset_name = "vkitti2"
-        dataset = _build_vkitti2_dataset(config, use_gpu)
+    dataset = _build_dataset(config)
+    dataset_name = config.get("dataset", "dataset")
 
+    modality_paths = {
+        **config.get("modalities", {}),
+        **config.get("hierarchical_modalities", {}),
+    }
     log_dataset_info(logger, dataset_name, len(dataset), modality_paths, use_gpu)
 
     foggify = Foggify(

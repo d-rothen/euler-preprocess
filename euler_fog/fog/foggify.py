@@ -672,6 +672,21 @@ def normalize_depth(
     return depth
 
 
+def normalize_sky_mask(sky_mask) -> np.ndarray:
+    """Normalise a sky mask to a 2-D boolean numpy array ``(H, W)``.
+
+    Handles torch tensors (GPU loaders) and the ``(1, H, W)`` channel-first
+    layout produced by euler-loading's GPU loaders.
+    """
+    mask = _to_numpy(sky_mask)
+    # (1, H, W) → (H, W)
+    if mask.ndim == 3 and mask.shape[0] == 1:
+        mask = mask[0]
+    if mask.ndim == 3 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    return mask.astype(bool)
+
+
 def _extract_intrinsics(sample: dict) -> np.ndarray | None:
     """Extract the 3x3 intrinsics matrix from a sample dict.
 
@@ -842,8 +857,9 @@ class Foggify:
                 if intrinsics is not None:
                     depth = planar_to_radial_depth(depth, intrinsics)
 
+                sky_mask = normalize_sky_mask(sample["sky_mask"])
                 estimated_airlight = self.airlight_estimator.estimate_airlight(
-                    rgb, sample["sky_mask"], sample_id=sample.get("id")
+                    rgb, sky_mask, sample_id=sample.get("id")
                 )
 
                 if self.seed is not None:
@@ -992,7 +1008,7 @@ class Foggify:
                             "rgb": rgb,
                             "depth": depth,
                             "intrinsics": intrinsics,
-                            "sky_mask": sample["sky_mask"],
+                            "sky_mask": normalize_sky_mask(sample["sky_mask"]),
                             "rng": rng,
                             "model_name": model_name,
                             "model_cfg": model_cfg,

@@ -14,15 +14,13 @@ import pytest
 from PIL import Image
 
 from euler_loading import Modality, MultiModalDataset
-from euler_loading.loaders.cpu import vkitti2 as loaders
 from euler_fog.fog.foggify import Foggify
-from euler_fog.fog.sky_mask import sky_mask_transform
 
 # ── Modality root paths ──────────────────────────────────────────────────────
 
 RGB_PATH = "/Volumes/Volume/Datasets/vkitti2/vkitti_2.0.3_rgb"
 DEPTH_PATH = "/Volumes/Volume/Datasets/vkitti2/vkitti_2.0.3_depth"
-SEGMENTATION_PATH = "/Volumes/Volume/Datasets/vkitti2/vkitti_2.0.3_classSegmentation"
+SKY_MASK_PATH = "/Volumes/Volume/Datasets/vkitti2/vkitti_2.0.3_classSegmentation"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -30,7 +28,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FOG_CONFIG_PATH = PROJECT_ROOT / "euler_fog" / "fog" / "example_config.json"
 OUTPUT_DIR = PROJECT_ROOT / ".tests"
 
-SKY_COLOR = [90, 200, 255]
 MAX_SAMPLES = 5  # limit for practical test runtime
 
 
@@ -47,16 +44,17 @@ def _make_cpu_fog_config(src: Path, dst: Path) -> Path:
 
 
 def _build_dataset() -> MultiModalDataset:
-    """Build a MultiModalDataset for VKITTI2 using euler-loading CPU loaders."""
+    """Build a MultiModalDataset for VKITTI2.
+
+    Loaders are resolved automatically by euler-loading from the ds-crawler
+    index at each modality path.
+    """
     return MultiModalDataset(
         modalities={
-            "rgb": Modality(RGB_PATH, loader=loaders.rgb),
-            "depth": Modality(DEPTH_PATH, loader=loaders.depth),
-            "classSegmentation": Modality(
-                SEGMENTATION_PATH, loader=loaders.class_segmentation,
-            ),
+            "rgb": Modality(RGB_PATH),
+            "depth": Modality(DEPTH_PATH),
+            "sky_mask": Modality(SKY_MASK_PATH),
         },
-        transforms=[sky_mask_transform(SKY_COLOR)],
     )
 
 
@@ -69,9 +67,9 @@ def test_foggify_with_real_data(tmp_path):
     dataset = _build_dataset()
     assert len(dataset) > 0, (
         f"No matching files found across modalities:\n"
-        f"  rgb:   {RGB_PATH}\n"
-        f"  depth: {DEPTH_PATH}\n"
-        f"  seg:   {SEGMENTATION_PATH}"
+        f"  rgb:      {RGB_PATH}\n"
+        f"  depth:    {DEPTH_PATH}\n"
+        f"  sky_mask: {SKY_MASK_PATH}"
     )
 
     n_samples = min(MAX_SAMPLES, len(dataset))

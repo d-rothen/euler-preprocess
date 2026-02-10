@@ -1,12 +1,12 @@
 {
-  "dataset": "real_drive_sim",
   "fog_config_path": "../euler_fog/fog/example_config.json",
   "output_path": "/Volumes/Volume/Datasets/real-drive-sim/foggy_output",
   "modalities": {
     "rgb": "/Volumes/Volume/Datasets/real-drive-sim/rgb",
     "depth": "/Volumes/Volume/Datasets/real-drive-sim/depth",
-    "classSegmentation": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d",
-    "intrinsics": "/Volumes/Volume/Datasets/real-drive-sim/calibration"
+    "sky_mask": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d"
   },
-  "sky_class_id": 29
+  "hierarchical_modalities": {
+    "intrinsics": "/Volumes/Volume/Datasets/real-drive-sim/calibration"
+  }
 }
