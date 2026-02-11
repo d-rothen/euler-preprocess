@@ -1,6 +1,6 @@
 [project]
 name = "euler-fog"
-version = "0.4.0"
+version = "0.4.1"
 description = "Physics-based fog augmentation for RGB+depth datasets"
 readme = "README.md"
 requires-python = ">=3.11"

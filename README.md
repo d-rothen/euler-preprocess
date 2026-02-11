@@ -1,6 +1,6 @@
 # Fog Generation
 
-Physically-based fog augmentation for multi-modal image datasets. Takes aligned RGB, depth, and semantic segmentation images and produces realistic foggy versions using the Koschmieder atmospheric scattering model with support for spatially-heterogeneous fog.
+Physically-based fog augmentation for multi-modal image datasets. Takes aligned RGB, depth, and sky mask images and produces realistic foggy versions using the Koschmieder atmospheric scattering model with support for spatially-heterogeneous fog.
 
 ## Usage
 
@@ -15,7 +15,7 @@ Two configuration files are required: a **dataset config** and a **fog config**.
 
 ### Dataset Config
 
-Points to the input data and the fog parameters.
+Points to the input data and the fog parameters. Each modality path must be a directory indexed by [ds-crawler](https://github.com/d-rothen/ds-crawler) with an `euler_loading` property in its config that specifies the loader and function (e.g. `"loader": "vkitti2", "function": "sky_mask"`). This allows euler-loading to auto-select the correct dataset-specific loader -- no dataset name or sky colour needs to be configured here.
 
 ```json
 {
@@ -24,9 +24,11 @@ Points to the input data and the fog parameters.
   "modalities": {
     "rgb": "/path/to/rgb",
     "depth": "/path/to/depth",
-    "classSegmentation": "/path/to/classSegmentation"
+    "sky_mask": "/path/to/classSegmentation"
   },
-  "sky_color": [90, 200, 255]
+  "hierarchical_modalities": {
+    "intrinsics": "/path/to/intrinsics"
+  }
 }
 ```
 
@@ -36,8 +38,8 @@ Points to the input data and the fog parameters.
 | `output_path` | Directory where foggy images are written. |
 | `modalities.rgb` | Root directory of RGB images. |
 | `modalities.depth` | Root directory of depth maps (values in **metres**). |
-| `modalities.classSegmentation` | Root directory of semantic segmentation maps. |
-| `sky_color` | RGB triplet identifying sky pixels in the segmentation maps. Default `[90, 200, 255]` (VKITTI). |
+| `modalities.sky_mask` | Root directory of segmentation / sky-mask images. The euler-loading `sky_mask` loader handles dataset-specific encoding (e.g. RGB colour match for VKITTI2, class-ID comparison for Real Drive Sim). |
+| `hierarchical_modalities.intrinsics` | *(optional)* Root directory of camera intrinsics files. Used to convert planar depth to radial depth. These are loaded per-scene and cached. |
 
 ### Fog Config
 
@@ -92,9 +94,9 @@ The clean scene image. Normalised to float32 in [0, 1]. This is the *I(x)* term 
 
 A per-pixel depth map in **metres**. Provides the *d(x)* term in the transmittance calculation `t(x) = exp(-k * d(x))`. Pixels with greater depth receive more fog. Invalid values (NaN, inf, negative) are clamped to zero (treated as infinitely close, receiving no fog).
 
-### Segmentation (Sky Mask)
+### Sky Mask
 
-The semantic segmentation map is used exclusively to derive a **sky mask**: a boolean per-pixel mask where the segmentation colour matches `sky_color`. The sky mask has two purposes:
+A boolean per-pixel mask indicating sky pixels, loaded directly via euler-loading's dataset-specific `sky_mask` loader (e.g. RGB colour match for VKITTI2, class-ID == 29 for Real Drive Sim). The sky mask has two purposes:
 
 1. **Airlight estimation** -- when `atmospheric_light` is `"from_sky"`, the mean RGB of all sky pixels in the clean image is used as the airlight colour *L_s*. This makes the fog colour match the actual sky appearance of each scene.
 2. **Scene-consistent appearance** -- because sky pixels already represent the atmospheric light colour, using them as *L_s* ensures the fog blends naturally into the horizon.
