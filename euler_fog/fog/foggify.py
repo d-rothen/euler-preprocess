@@ -793,12 +793,21 @@ class Foggify:
                 f"Supported values: {AIRLIGHT_METHODS}"
             )
         self.airlight_method = airlight_method
+        self.airlight_estimator_torch = None
         if airlight_method == "from_sky":
             self.airlight_estimator = AirlightFromSky(sky_depth_threshold=0.0)
         elif airlight_method == "dcp":
             self.airlight_estimator = DCPAirlight()
+            if torch is not None:
+                from euler_fog.fog.dcp_airlight_torch import DCPAirlightTorch
+                self.airlight_estimator_torch = DCPAirlightTorch()
         elif airlight_method == "dcp_heuristic":
             self.airlight_estimator = DCPHeuristicAirlight()
+            if torch is not None:
+                from euler_fog.fog.dcp_heuristic_airlight_torch import (
+                    DCPHeuristicAirlightTorch,
+                )
+                self.airlight_estimator_torch = DCPHeuristicAirlightTorch()
 
     def generate_fog(self, samples: Iterable[dict]) -> list[Path]:
         """Generate fog on the given samples.
@@ -1120,17 +1129,14 @@ class Foggify:
                                         )
                                     airlight[no_sky] = 1.0
                             else:
-                                # DCP / DCP heuristic: per-sample on CPU numpy
+                                # DCP / DCP heuristic: per-sample on GPU
+                                assert self.airlight_estimator_torch is not None
                                 al_list = []
-                                for item in uniform_items:
-                                    al_np = self.airlight_estimator.compute(
-                                        item["rgb"]
+                                for idx in range(len(uniform_items)):
+                                    al_t = self.airlight_estimator_torch.compute(
+                                        rgb_batch[idx]
                                     )
-                                    al_list.append(
-                                        torch.from_numpy(al_np).to(
-                                            device=device, dtype=torch.float32
-                                        )
-                                    )
+                                    al_list.append(al_t)
                                 airlight = torch.stack(al_list, dim=0)
                             ls_base = normalize_atmospheric_light_torch(airlight)
                         else:
@@ -1216,9 +1222,9 @@ class Foggify:
                                 rgb_t, sky_mask_t, sample_id=item["sample_id"]
                             )
                         else:
-                            al_np = self.airlight_estimator.compute(item["rgb"])
-                            estimated_airlight = torch.from_numpy(al_np).to(
-                                device=device, dtype=torch.float32
+                            assert self.airlight_estimator_torch is not None
+                            estimated_airlight = (
+                                self.airlight_estimator_torch.compute(rgb_t)
                             )
                         torch_gen = self._torch_generator_for_index(item["index"])
                         foggy_t, beta, airlight_t = self._apply_model_torch(
