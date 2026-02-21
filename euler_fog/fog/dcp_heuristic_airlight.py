@@ -6,8 +6,16 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
 
-class DCPAirlight:
-    """Estimate atmospheric light using the Dark Channel Prior."""
+class DCPHeuristicAirlight:
+    """Estimate atmospheric light via Dark Channel Prior with median heuristic.
+
+    Like :class:`DCPAirlight`, this selects the top bright pixels from the dark
+    channel.  Instead of picking the single brightest pixel (by sum of
+    channels), it converts candidates to grayscale (NTSC/BT.601 weights) and
+    picks the pixel whose intensity equals the **median** among candidates.
+    The candidate count is forced to be odd so that the median always
+    corresponds to an actual pixel.
+    """
 
     def __init__(self, patch_size: int = 15, top_percent: float = 0.001) -> None:
         patch_size = int(patch_size)
@@ -18,6 +26,8 @@ class DCPAirlight:
             raise ValueError("top_percent must be in (0, 1]")
         self.patch_size = patch_size
         self.top_percent = top_percent
+
+    # -- public interface (matches AirlightFromSky / DCPAirlight) -----------
 
     def __call__(self, rgb: np.ndarray) -> np.ndarray:
         return self.compute(rgb)
@@ -30,19 +40,23 @@ class DCPAirlight:
         if num_pixels == 0:
             raise ValueError("rgb image is empty")
 
-        num_select = max(1, int(math.ceil(num_pixels * self.top_percent)))
-        num_select = min(num_select, num_pixels)
+        num_select = self._brightest_pixels_count(num_pixels)
+        flat_dark = dark_channel.ravel()
 
-        flat_dark = dark_channel.reshape(-1)
-        if num_select == num_pixels:
+        if num_select >= num_pixels:
             candidate_idx = np.arange(num_pixels)
         else:
             candidate_idx = np.argpartition(flat_dark, -num_select)[-num_select:]
 
-        intensity = image.sum(axis=2).reshape(-1)
-        best_idx = candidate_idx[np.argmax(intensity[candidate_idx])]
-        airlight = image.reshape(-1, 3)[best_idx]
+        # NTSC/BT.601 luminance weights
+        i_gray = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140]).ravel()
+        candidate_gray = i_gray[candidate_idx]
 
+        median_intensity = np.median(candidate_gray)
+        local_best_idx = np.argmin(np.abs(candidate_gray - median_intensity))
+        best_idx = candidate_idx[local_best_idx]
+
+        airlight = image.reshape(-1, 3)[best_idx]
         return airlight.astype(np.float32)
 
     def estimate_airlight(
@@ -57,6 +71,14 @@ class DCPAirlight:
         the dark channel prior estimates airlight from the full image.
         """
         return self.compute(image)
+
+    # -- internals ----------------------------------------------------------
+
+    def _brightest_pixels_count(self, num_pixels: int) -> int:
+        count = int(math.floor(self.top_percent * num_pixels))
+        # Force odd so that the median matches an actual pixel
+        count = count + ((count + 1) % 2)
+        return max(1, min(count, num_pixels))
 
     def _prepare_rgb(self, rgb: np.ndarray) -> np.ndarray:
         image = np.asarray(rgb)

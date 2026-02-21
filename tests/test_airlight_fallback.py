@@ -162,6 +162,7 @@ class TestFoggifyEmptySkyMask:
     @pytest.fixture
     def fog_config(self, tmp_path):
         cfg = {
+            "airlight": "from_sky",
             "device": "cpu",
             "models": {
                 "uniform": {
@@ -214,6 +215,7 @@ class TestFoggifyOutputHierarchy:
     @pytest.fixture
     def fog_config(self, tmp_path):
         cfg = {
+            "airlight": "from_sky",
             "device": "cpu",
             "models": {
                 "uniform": {

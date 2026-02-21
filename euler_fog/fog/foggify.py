@@ -11,7 +11,11 @@ from PIL import Image
 import logging
 
 from euler_fog.fog.airlight_from_sky import AirlightFromSky
+from euler_fog.fog.dcp_airlight import DCPAirlight
+from euler_fog.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
 from euler_fog.fog.foggify_logging import get_logger, log_config, progress_bar
+
+AIRLIGHT_METHODS = ("from_sky", "dcp", "dcp_heuristic")
 
 _torch_logger = logging.getLogger("foggify")
 
@@ -777,7 +781,24 @@ class Foggify:
         )
 
         # Initialize the airlight estimator
-        self.airlight_estimator = AirlightFromSky(sky_depth_threshold=0.0)
+        airlight_method = self.config.get("airlight")
+        if airlight_method is None:
+            raise ValueError(
+                "Config must specify 'airlight' key. "
+                f"Supported values: {AIRLIGHT_METHODS}"
+            )
+        if airlight_method not in AIRLIGHT_METHODS:
+            raise ValueError(
+                f"Unknown airlight method '{airlight_method}'. "
+                f"Supported values: {AIRLIGHT_METHODS}"
+            )
+        self.airlight_method = airlight_method
+        if airlight_method == "from_sky":
+            self.airlight_estimator = AirlightFromSky(sky_depth_threshold=0.0)
+        elif airlight_method == "dcp":
+            self.airlight_estimator = DCPAirlight()
+        elif airlight_method == "dcp_heuristic":
+            self.airlight_estimator = DCPHeuristicAirlight()
 
     def generate_fog(self, samples: Iterable[dict]) -> list[Path]:
         """Generate fog on the given samples.
@@ -1072,31 +1093,45 @@ class Foggify:
                             "atmospheric_light", "from_sky"
                         )
                         if al_spec == "from_sky" or al_spec is None:
-                            sky_mask_batch = torch.stack(
-                                [
-                                    torch.from_numpy(item["sky_mask"]).to(device)
-                                    for item in uniform_items
-                                ],
-                                dim=0,
-                            ).to(torch.float32)
-                            mask_sum = sky_mask_batch.sum(dim=(1, 2))
-                            no_sky = mask_sum == 0
-                            safe_sum = mask_sum.clone()
-                            safe_sum[no_sky] = 1.0  # avoid division by zero
-                            airlight = (
-                                rgb_batch * sky_mask_batch[..., None]
-                            ).sum(dim=(1, 2)) / safe_sum[:, None]
-                            # Replace NaN rows (no sky) with white fallback
-                            if no_sky.any():
-                                for idx_ns in no_sky.nonzero(as_tuple=False):
-                                    i = int(idx_ns.item())
-                                    self.logger.warning(
-                                        "No sky pixels in segmentation mask "
-                                        "(sample %s); using default airlight "
-                                        "fallback [1.0, 1.0, 1.0]",
-                                        uniform_items[i]["sample_id"],
+                            if self.airlight_method == "from_sky":
+                                sky_mask_batch = torch.stack(
+                                    [
+                                        torch.from_numpy(item["sky_mask"]).to(device)
+                                        for item in uniform_items
+                                    ],
+                                    dim=0,
+                                ).to(torch.float32)
+                                mask_sum = sky_mask_batch.sum(dim=(1, 2))
+                                no_sky = mask_sum == 0
+                                safe_sum = mask_sum.clone()
+                                safe_sum[no_sky] = 1.0  # avoid division by zero
+                                airlight = (
+                                    rgb_batch * sky_mask_batch[..., None]
+                                ).sum(dim=(1, 2)) / safe_sum[:, None]
+                                # Replace NaN rows (no sky) with white fallback
+                                if no_sky.any():
+                                    for idx_ns in no_sky.nonzero(as_tuple=False):
+                                        i = int(idx_ns.item())
+                                        self.logger.warning(
+                                            "No sky pixels in segmentation mask "
+                                            "(sample %s); using default airlight "
+                                            "fallback [1.0, 1.0, 1.0]",
+                                            uniform_items[i]["sample_id"],
+                                        )
+                                    airlight[no_sky] = 1.0
+                            else:
+                                # DCP / DCP heuristic: per-sample on CPU numpy
+                                al_list = []
+                                for item in uniform_items:
+                                    al_np = self.airlight_estimator.compute(
+                                        item["rgb"]
                                     )
-                                airlight[no_sky] = 1.0
+                                    al_list.append(
+                                        torch.from_numpy(al_np).to(
+                                            device=device, dtype=torch.float32
+                                        )
+                                    )
+                                airlight = torch.stack(al_list, dim=0)
                             ls_base = normalize_atmospheric_light_torch(airlight)
                         else:
                             ls_values = []
@@ -1173,12 +1208,18 @@ class Foggify:
                                 device=device, dtype=torch.float32,
                             )
                             depth_t = planar_to_radial_depth_torch(depth_t, K_t)
-                        sky_mask_t = (
-                            torch.from_numpy(item["sky_mask"]).to(device).bool()
-                        )
-                        estimated_airlight = estimate_airlight_torch(
-                            rgb_t, sky_mask_t, sample_id=item["sample_id"]
-                        )
+                        if self.airlight_method == "from_sky":
+                            sky_mask_t = (
+                                torch.from_numpy(item["sky_mask"]).to(device).bool()
+                            )
+                            estimated_airlight = estimate_airlight_torch(
+                                rgb_t, sky_mask_t, sample_id=item["sample_id"]
+                            )
+                        else:
+                            al_np = self.airlight_estimator.compute(item["rgb"])
+                            estimated_airlight = torch.from_numpy(al_np).to(
+                                device=device, dtype=torch.float32
+                            )
                         torch_gen = self._torch_generator_for_index(item["index"])
                         foggy_t, beta, airlight_t = self._apply_model_torch(
                             rgb_t,

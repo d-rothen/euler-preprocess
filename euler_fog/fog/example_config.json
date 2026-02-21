@@ -1,4 +1,5 @@
 {
+  "airlight": "from_sky",
   "seed": 1337,
   "depth_scale": 1.0,
   "resize_depth": true,
