@@ -1,8 +1,9 @@
 """CLI entry point for euler-preprocess.
 
 Used both by ``python main.py`` and by the installed ``euler-preprocess`` console
-script.
+script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``.
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -10,31 +11,10 @@ from pathlib import Path
 
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.logging import get_logger, log_dataset_info
-from euler_preprocess.fog.transform import FogTransform
 
 
 # ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-_FOG_REQUIRED_MODALITIES = {"rgb", "depth", "sky_mask"}
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate foggy versions of datasets.",
-    )
-    parser.add_argument(
-        "--config", "-c",
-        type=str,
-        required=True,
-        help="Path to the configuration JSON file.",
-    )
-    return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# Main
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _resolve(path_str: str, config_dir: Path) -> Path:
@@ -45,8 +25,8 @@ def _resolve(path_str: str, config_dir: Path) -> Path:
     return (config_dir / p).resolve()
 
 
-def main() -> int:
-    args = parse_args()
+def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
+    """Shared logic for all subcommands."""
     logger = get_logger()
 
     config_path = Path(args.config).resolve()
@@ -55,20 +35,27 @@ def main() -> int:
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    fog_config_path = _resolve(config["fog_config_path"], config_dir)
+    # Resolve the transform-specific config path.
+    # Support both ``transform_config_path`` and legacy ``fog_config_path``.
+    transform_config_key = "transform_config_path"
+    if transform_config_key not in config:
+        transform_config_key = "fog_config_path"
+    transform_config_path = _resolve(config[transform_config_key], config_dir)
     output_path = config["output_path"]
 
-    # Read the fog config to determine the device
-    with open(fog_config_path, "r", encoding="utf-8") as f:
-        fog_cfg = json.load(f)
-    device = fog_cfg.get("device", "cpu").lower()
+    # Read the transform config to determine the device (for dataset logging)
+    with open(transform_config_path, "r", encoding="utf-8") as f:
+        transform_cfg = json.load(f)
+    device = transform_cfg.get("device", "cpu").lower()
     use_gpu = device not in ("cpu",)
 
     logger.info("Config: %s", args.config)
-    logger.info("Fog config: %s", fog_config_path)
+    logger.info("Transform config: %s", transform_config_path)
     logger.info("Output path: %s", output_path)
 
-    dataset = build_dataset(config, _FOG_REQUIRED_MODALITIES)
+    required_modalities = transform_class.REQUIRED_MODALITIES
+    required_hierarchical = transform_class.REQUIRED_HIERARCHICAL_MODALITIES or None
+    dataset = build_dataset(config, required_modalities, required_hierarchical)
     dataset_name = config.get("dataset", "dataset")
 
     modality_paths = {
@@ -77,12 +64,87 @@ def main() -> int:
     }
     log_dataset_info(logger, dataset_name, len(dataset), modality_paths, use_gpu)
 
-    transform = FogTransform(
-        config_path=fog_config_path,
+    transform = transform_class(
+        config_path=str(transform_config_path),
         out_path=output_path,
     )
 
     saved_paths = transform.run(dataset)
 
-    logger.info("Fog generation complete. Generated %d images.", len(saved_paths))
+    logger.info("Transform complete. Generated %d outputs.", len(saved_paths))
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers
+# ---------------------------------------------------------------------------
+
+def _cmd_fog(args: argparse.Namespace) -> int:
+    from euler_preprocess.fog.transform import FogTransform
+    return _run_transform(args, FogTransform)
+
+
+def _cmd_sky_depth(args: argparse.Namespace) -> int:
+    from euler_preprocess.sky_depth.transform import SkyDepthTransform
+    return _run_transform(args, SkyDepthTransform)
+
+
+def _cmd_radial(args: argparse.Namespace) -> int:
+    from euler_preprocess.radial.transform import RadialTransform
+    return _run_transform(args, RadialTransform)
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Preprocessing transforms for RGB+depth datasets.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- fog ---
+    fog_parser = subparsers.add_parser(
+        "fog", help="Apply synthetic fog to RGB images.",
+    )
+    fog_parser.add_argument(
+        "--config", "-c", type=str, required=True,
+        help="Path to the dataset configuration JSON file.",
+    )
+    fog_parser.set_defaults(func=_cmd_fog)
+
+    # --- sky-depth ---
+    sky_depth_parser = subparsers.add_parser(
+        "sky-depth", help="Override sky-region depth values.",
+    )
+    sky_depth_parser.add_argument(
+        "--config", "-c", type=str, required=True,
+        help="Path to the dataset configuration JSON file.",
+    )
+    sky_depth_parser.set_defaults(func=_cmd_sky_depth)
+
+    # --- radial ---
+    radial_parser = subparsers.add_parser(
+        "radial", help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
+    )
+    radial_parser.add_argument(
+        "--config", "-c", type=str, required=True,
+        help="Path to the dataset configuration JSON file.",
+    )
+    radial_parser.set_defaults(func=_cmd_radial)
+
+    args = parser.parse_args()
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return parser.parse_args(["--help"])
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
+    args = parse_args()
+    return args.func(args)
