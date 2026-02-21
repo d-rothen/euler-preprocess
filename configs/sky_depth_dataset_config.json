@@ -1,0 +1,8 @@
+{
+  "transform_config_path": "sky_depth_config.json",
+  "output_path": "/path/to/output",
+  "modalities": {
+    "depth": "/path/to/depth",
+    "sky_mask": "/path/to/classSegmentation"
+  }
+}

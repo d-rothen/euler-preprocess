@@ -1,0 +1,10 @@
+{
+  "transform_config_path": "radial_config.json",
+  "output_path": "/path/to/output",
+  "modalities": {
+    "depth": "/path/to/depth"
+  },
+  "hierarchical_modalities": {
+    "intrinsics": "/path/to/intrinsics"
+  }
+}

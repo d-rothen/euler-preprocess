@@ -1,25 +1,38 @@
-# Fog Generation
+# euler-preprocess
 
-Physically-based fog augmentation for multi-modal image datasets. Takes aligned RGB, depth, and sky mask images and produces realistic foggy versions using the Koschmieder atmospheric scattering model with support for spatially-heterogeneous fog.
+Physics-based preprocessing transforms for multi-modal RGB+depth datasets. Built on top of [euler-loading](https://github.com/d-rothen/euler-loading) and [ds-crawler](https://github.com/d-rothen/ds-crawler).
+
+Available transforms:
+
+| Command | Description |
+|---|---|
+| `euler-preprocess fog` | Synthetic fog via the Koschmieder atmospheric scattering model |
+| `euler-preprocess sky-depth` | Override depth values in sky regions with a constant |
+| `euler-preprocess radial` | Convert planar (z-buffer) depth to radial (Euclidean) depth |
+
+## Installation
+
+```bash
+uv pip install "euler-preprocess[gpu,progress] @ git+https://github.com/d-rothen/euler-fog"
+```
 
 ## Usage
 
 ```bash
-uv pip install "euler-fog[gpu,progress] @ git+https://github.com/d-rothen/euler-fog"
-python main.py --config configs/example_dataset_config.json
+euler-preprocess fog       -c configs/example_dataset_config.json
+euler-preprocess sky-depth -c configs/sky_depth_dataset_config.json
+euler-preprocess radial    -c configs/radial_dataset_config.json
 ```
 
 ## Configuration
 
-Two configuration files are required: a **dataset config** and a **fog config**.
+Every subcommand takes a **dataset config** JSON that points to the input data and a **transform config**. Each modality path must be a directory indexed by [ds-crawler](https://github.com/d-rothen/ds-crawler) with an `euler_loading` property that specifies the loader and function. This allows euler-loading to auto-select the correct dataset-specific loader.
 
 ### Dataset Config
 
-Points to the input data and the fog parameters. Each modality path must be a directory indexed by [ds-crawler](https://github.com/d-rothen/ds-crawler) with an `euler_loading` property in its config that specifies the loader and function (e.g. `"loader": "vkitti2", "function": "sky_mask"`). This allows euler-loading to auto-select the correct dataset-specific loader -- no dataset name or sky colour needs to be configured here.
-
 ```json
 {
-  "fog_config_path": "configs/run1.json",
+  "transform_config_path": "configs/run1.json",
   "output_path": "/path/to/output",
   "modalities": {
     "rgb": "/path/to/rgb",
@@ -34,19 +47,30 @@ Points to the input data and the fog parameters. Each modality path must be a di
 
 | Field | Description |
 |---|---|
-| `fog_config_path` | Path to the fog generation config (see below). |
-| `output_path` | Directory where foggy images are written. |
-| `modalities.rgb` | Root directory of RGB images. |
-| `modalities.depth` | Root directory of depth maps (values in **metres**). |
-| `modalities.sky_mask` | Root directory of segmentation / sky-mask images. The euler-loading `sky_mask` loader handles dataset-specific encoding (e.g. RGB colour match for VKITTI2, class-ID comparison for Real Drive Sim). |
-| `hierarchical_modalities.intrinsics` | *(optional)* Root directory of camera intrinsics files. Used to convert planar depth to radial depth. These are loaded per-scene and cached. |
+| `transform_config_path` | Path to the transform-specific config (see below). `fog_config_path` is also accepted for backward compatibility. |
+| `output_path` | Directory where outputs are written. |
+| `modalities` | Regular modalities that participate in sample-ID intersection. Which modalities are required depends on the transform (see table below). |
+| `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Loaded once per scene and cached. |
+
+**Required modalities per transform:**
+
+| Transform | `modalities` | `hierarchical_modalities` |
+|---|---|---|
+| `fog` | `rgb`, `depth`, `sky_mask` | — (intrinsics optional) |
+| `sky-depth` | `depth`, `sky_mask` | — |
+| `radial` | `depth` | `intrinsics` |
+
+---
+
+## Fog Transform
 
 ### Fog Config
 
-Controls the fog simulation itself.
+Controls the fog simulation.
 
 ```json
 {
+  "airlight": "from_sky",
   "seed": 1337,
   "depth_scale": 1.0,
   "resize_depth": true,
@@ -60,6 +84,7 @@ Controls the fog simulation itself.
 
 | Field | Description |
 |---|---|
+| `airlight` | **Required.** Airlight estimation method: `"from_sky"` (mean sky colour), `"dcp"` (dark channel prior), or `"dcp_heuristic"` (DCP with median heuristic). |
 | `seed` | Random seed for reproducibility. `null` for non-deterministic. |
 | `depth_scale` | Multiplier applied to depth values after loading. |
 | `resize_depth` | Resize the depth map to match the RGB resolution (bilinear). |
@@ -67,7 +92,7 @@ Controls the fog simulation itself.
 | `device` | `"cpu"`, `"cuda"`, `"mps"`, or `"gpu"` (alias for cuda). |
 | `gpu_batch_size` | Batch size when running on GPU. Uniform-model samples are batched; heterogeneous samples are processed individually. |
 
-## Fog Model
+### Fog Model
 
 The core equation is the **Koschmieder model** (atmospheric scattering):
 
@@ -84,24 +109,29 @@ where:
 
 Distant objects are attenuated more (`t` approaches 0) and replaced by airlight, just as in real fog.
 
-## How Each Modality is Used
+### How Each Modality is Used
 
-### RGB
+**RGB** — The clean scene image. Normalised to float32 in [0, 1]. This is the *I(x)* term in the fog equation -- it gets blended with the airlight according to transmittance.
 
-The clean scene image. Normalised to float32 in [0, 1]. This is the *I(x)* term in the fog equation -- it gets blended with the airlight according to transmittance.
+**Depth** — A per-pixel depth map in **metres**. Provides the *d(x)* term in the transmittance calculation `t(x) = exp(-k * d(x))`. Pixels with greater depth receive more fog. Invalid values (NaN, inf, negative) are clamped to zero (treated as infinitely close, receiving no fog).
 
-### Depth
+**Sky Mask** — A boolean per-pixel mask indicating sky pixels, loaded directly via euler-loading's dataset-specific `sky_mask` loader. The sky mask is used for airlight estimation when the `airlight` method is `"from_sky"`: the mean RGB of all sky pixels in the clean image is used as the airlight colour *L_s*.
 
-A per-pixel depth map in **metres**. Provides the *d(x)* term in the transmittance calculation `t(x) = exp(-k * d(x))`. Pixels with greater depth receive more fog. Invalid values (NaN, inf, negative) are clamped to zero (treated as infinitely close, receiving no fog).
+**Intrinsics** *(optional)* — When present, planar (z-buffer) depth is converted to radial (Euclidean) depth before fog is applied.
 
-### Sky Mask
+### Airlight Estimation
 
-A boolean per-pixel mask indicating sky pixels, loaded directly via euler-loading's dataset-specific `sky_mask` loader (e.g. RGB colour match for VKITTI2, class-ID == 29 for Real Drive Sim). The sky mask has two purposes:
+The `airlight` config key selects how the atmospheric light *L_s* is estimated:
 
-1. **Airlight estimation** -- when `atmospheric_light` is `"from_sky"`, the mean RGB of all sky pixels in the clean image is used as the airlight colour *L_s*. This makes the fog colour match the actual sky appearance of each scene.
-2. **Scene-consistent appearance** -- because sky pixels already represent the atmospheric light colour, using them as *L_s* ensures the fog blends naturally into the horizon.
+| Method | Description |
+|---|---|
+| `from_sky` | Mean RGB of sky pixels in the clean image. Falls back to white `[1, 1, 1]` when no sky pixels exist. |
+| `dcp` | Dark Channel Prior — selects the brightest pixel (by channel sum) among the top 0.1% darkest-channel pixels. |
+| `dcp_heuristic` | DCP with median heuristic — selects the pixel closest to the median intensity (BT.601 grayscale) among the top 0.1% darkest-channel pixels. |
 
-## Model Selection
+GPU-native implementations (`DCPAirlightTorch`, `DCPHeuristicAirlightTorch`) are used automatically when running on GPU.
+
+### Model Selection
 
 Each image is assigned a fog model via the `selection` block:
 
@@ -120,27 +150,18 @@ Each image is assigned a fog model via the `selection` block:
 - **`fixed`** mode: always use a single named model.
 - **`weighted`** mode: randomly select a model per image according to normalised weights.
 
-Four models are available, described below.
+Four models are available:
 
-### `uniform`
+| Model | Description |
+|---|---|
+| `uniform` | Constant *k* and *L_s*. Standard homogeneous fog. |
+| `heterogeneous_k` | Spatially-varying *k*, constant *L_s*. Simulates patchy fog / fog banks. |
+| `heterogeneous_ls` | Constant *k*, spatially-varying *L_s*. Simulates scattered-light colour variation. |
+| `heterogeneous_k_ls` | Both *k* and *L_s* vary spatially. Most expressive model. |
 
-Constant *k* and constant *L_s* across the entire image. The simplest and fastest model -- standard homogeneous fog.
+### Visibility Distribution
 
-### `heterogeneous_k`
-
-Spatially-varying attenuation coefficient with constant airlight. Simulates patchy fog where density varies across the scene (e.g. fog banks, ground fog).
-
-### `heterogeneous_ls`
-
-Constant attenuation coefficient with spatially-varying airlight. Simulates variation in the scattered light colour across the image.
-
-### `heterogeneous_k_ls`
-
-Both *k* and *L_s* vary spatially. The most expressive model, combining density and colour variation.
-
-## Visibility Distribution
-
-Each model specifies a `visibility_m` distribution from which a visibility distance (in metres) is sampled per image. Supported distributions:
+Each model specifies a `visibility_m` distribution from which a visibility distance (in metres) is sampled per image:
 
 | `dist` | Parameters | Description |
 |---|---|---|
@@ -152,9 +173,9 @@ Each model specifies a `visibility_m` distribution from which a visibility dista
 
 The sampled visibility *V* is converted to the attenuation coefficient: **k = -ln(C_t) / V**.
 
-## Heterogeneous Attenuation (`k_hetero`)
+### Heterogeneous Noise Fields
 
-The `k_hetero` block controls how the scalar *k* is modulated into a spatially-varying 2D field.
+Both `k_hetero` and `ls_hetero` use Perlin FBM (fractional Brownian motion) to generate spatially-varying factor fields:
 
 ```json
 "k_hetero": {
@@ -167,58 +188,15 @@ The `k_hetero` block controls how the scalar *k* is modulated into a spatially-v
 }
 ```
 
-**Noise generation.** A fractional Brownian motion (FBM) field is synthesised by summing multiple octaves of improved Perlin noise. Each octave operates at a different spatial scale and is weighted by `log2(scale)^2`, giving larger scales (low-frequency variation) more influence.
-
-**Scale resolution.** When `scales` is `"auto"`, octave scales are generated as powers of 2 from `min_scale` up to `max_scale` (defaults to `max(H, W)`). You can also supply an explicit list of integers.
-
-**Modulation.** The noise field (values in [0, 1]) is mapped to a factor field:
-
-```
-factor(x) = min_factor + (max_factor - min_factor) * noise(x)
-```
-
-When `normalize_to_mean` is `true`, the factor field is rescaled so its spatial mean equals 1.0. This preserves the overall fog density (mean *k* stays at `k_mean`) while introducing spatial variation. The final field is:
-
-```
-k(x) = k_mean * factor(x)
-```
+The noise field (values in [0, 1]) is mapped to a factor field: `factor(x) = min_factor + (max_factor - min_factor) * noise(x)`. When `normalize_to_mean` is `true`, the factor field is rescaled so its spatial mean equals 1.0, preserving the overall fog density while introducing spatial variation.
 
 | Parameter | Effect |
 |---|---|
-| `min_factor` / `max_factor` | Range of the multiplicative factor. `[0, 1]` means fog density ranges from clear to the base value. `[0.5, 1.5]` means +/-50% variation. |
-| `normalize_to_mean` | When `true`, rescales factors so the image-wide mean *k* equals `k_mean`. Recommended for `k_hetero` to keep the average fog consistent with the sampled visibility. |
-| `scales` / `min_scale` / `max_scale` | Control the spatial frequency content. Smaller scales produce fine-grained patchiness; larger scales produce broad fog banks. |
+| `min_factor` / `max_factor` | Range of the multiplicative factor. |
+| `normalize_to_mean` | Rescale factors so the image-wide mean equals the base value. Recommended for `k_hetero`. |
+| `scales` / `min_scale` / `max_scale` | Control spatial frequency content. |
 
-## Heterogeneous Airlight (`ls_hetero`)
-
-The `ls_hetero` block modulates the base airlight colour into a spatially-varying (H, W, 3) field using the same Perlin FBM approach.
-
-```json
-"ls_hetero": {
-  "scales": "auto",
-  "min_scale": 2,
-  "max_scale": null,
-  "min_factor": 0.0,
-  "max_factor": 1.0,
-  "normalize_to_mean": false
-}
-```
-
-The base airlight *L_s* (a 3-channel RGB value, either estimated from sky pixels or sampled from the config) is multiplied by the same type of factor field:
-
-```
-L_s(x) = L_s_base * factor(x)
-```
-
-The factor field is scalar (single-channel), so all three colour channels are scaled uniformly at each pixel -- this varies the **intensity** of the airlight across the image without shifting its hue.
-
-| Parameter | Effect |
-|---|---|
-| `min_factor` / `max_factor` | Range of brightness modulation. `[0, 1]` means airlight ranges from black to the base colour. |
-| `normalize_to_mean` | Typically `false` for `ls_hetero`. Setting it to `true` would preserve the mean airlight brightness but is less physically motivated than for *k*. |
-| `scales` / `min_scale` / `max_scale` | Same spatial frequency control as `k_hetero`. |
-
-## Output
+### Fog Output
 
 Foggy images are saved as PNG files organised by model name:
 
@@ -231,4 +209,46 @@ Foggy images are saved as PNG files organised by model name:
     ...
 ```
 
-The filename encodes the mean attenuation coefficient (`beta`) and airlight RGB used for that image. Each model subdirectory also contains a `config.json` with the resolved parameters.
+---
+
+## Sky-Depth Transform
+
+Overrides depth values in sky regions with a configurable constant. Useful for datasets where sky depth is encoded as zero or infinity and needs to be normalised to a large finite value.
+
+### Sky-Depth Config
+
+```json
+{
+  "sky_depth_value": 1000.0
+}
+```
+
+| Field | Description |
+|---|---|
+| `sky_depth_value` | Depth value assigned to all sky pixels. Defaults to `1000.0`. |
+
+### Sky-Depth Output
+
+Depth maps are saved as `.npy` float32 files preserving the original directory hierarchy.
+
+---
+
+## Radial Transform
+
+Converts planar (z-buffer) depth to radial (Euclidean) depth using camera intrinsics. For each pixel *(u, v)*:
+
+```
+d_radial(u, v) = d_planar(u, v) * sqrt(((u - cx)/fx)^2 + ((v - cy)/fy)^2 + 1)
+```
+
+### Radial Config
+
+```json
+{}
+```
+
+No special parameters are required. The transform reads intrinsics from the `intrinsics` hierarchical modality.
+
+### Radial Output
+
+Depth maps are saved as `.npy` float32 files preserving the original directory hierarchy.
