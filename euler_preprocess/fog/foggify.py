@@ -6,14 +6,27 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 import logging
 
-from euler_fog.fog.airlight_from_sky import AirlightFromSky
-from euler_fog.fog.dcp_airlight import DCPAirlight
-from euler_fog.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
-from euler_fog.fog.foggify_logging import get_logger, log_config, progress_bar
+from euler_preprocess.common.device import configure_device, iter_batches, torch_generator_for_index
+from euler_preprocess.common.intrinsics import extract_intrinsics, planar_to_radial_depth, planar_to_radial_depth_torch
+from euler_preprocess.common.io import load_json, save_image
+from euler_preprocess.common.logging import get_logger, progress_bar
+from euler_preprocess.common.noise import perlin_fbm, perlin_fbm_torch
+from euler_preprocess.common.normalize import (
+    _is_chw,
+    _to_numpy,
+    normalize_depth,
+    normalize_rgb,
+    normalize_rgb_torch,
+    normalize_sky_mask,
+)
+from euler_preprocess.common.sampling import deep_merge, format_value, sample_value
+from euler_preprocess.fog.airlight_from_sky import AirlightFromSky
+from euler_preprocess.fog.dcp_airlight import DCPAirlight
+from euler_preprocess.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
+from euler_preprocess.fog.foggify_logging import log_config
 
 AIRLIGHT_METHODS = ("from_sky", "dcp", "dcp_heuristic")
 
@@ -78,192 +91,6 @@ DEFAULT_MODEL_CONFIGS = {
 }
 
 
-def load_json(path: Path) -> dict:
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def save_image(path: Path, rgb: np.ndarray) -> None:
-    rgb = np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
-    img = Image.fromarray(rgb, mode="RGB")
-    img.save(path)
-
-
-def resize_depth(depth: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
-    height, width = target_shape
-    if depth.shape == (height, width):
-        return depth
-    depth_img = Image.fromarray(depth.astype(np.float32), mode="F")
-    depth_img = depth_img.resize((width, height), resample=Image.BILINEAR)
-    return np.asarray(depth_img, dtype=np.float32)
-
-
-def lerp(a: np.ndarray, b: np.ndarray, t: np.ndarray) -> np.ndarray:
-    return a + t * (b - a)
-
-
-def fade(t: np.ndarray) -> np.ndarray:
-    return t * t * t * (t * (t * 6 - 15) + 10)
-
-
-def perlin_noise(
-    height: int, width: int, scale: float, rng: np.random.Generator
-) -> np.ndarray:
-    scale = float(scale)
-    if scale <= 0:
-        raise ValueError(f"Perlin scale must be > 0, got {scale}")
-    grid_w = int(math.ceil(width / scale)) + 1
-    grid_h = int(math.ceil(height / scale)) + 1
-
-    angles = rng.uniform(0, 2 * math.pi, size=(grid_h, grid_w))
-    grads = np.stack((np.cos(angles), np.sin(angles)), axis=-1)
-
-    x = np.arange(width, dtype=np.float32) / scale
-    y = np.arange(height, dtype=np.float32) / scale
-    x0 = np.floor(x).astype(int)
-    y0 = np.floor(y).astype(int)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    xf = x - x0
-    yf = y - y0
-
-    x0g = x0[None, :]
-    x1g = x1[None, :]
-    y0g = y0[:, None]
-    y1g = y1[:, None]
-    xf_g = xf[None, :]
-    yf_g = yf[:, None]
-    u = fade(xf_g)
-    v = fade(yf_g)
-
-    g00 = grads[y0g, x0g]
-    g10 = grads[y0g, x1g]
-    g01 = grads[y1g, x0g]
-    g11 = grads[y1g, x1g]
-
-    d00 = g00[..., 0] * xf_g + g00[..., 1] * yf_g
-    d10 = g10[..., 0] * (xf_g - 1) + g10[..., 1] * yf_g
-    d01 = g01[..., 0] * xf_g + g01[..., 1] * (yf_g - 1)
-    d11 = g11[..., 0] * (xf_g - 1) + g11[..., 1] * (yf_g - 1)
-
-    nx0 = lerp(d00, d10, u)
-    nx1 = lerp(d01, d11, u)
-    nxy = lerp(nx0, nx1, v)
-
-    min_val = float(nxy.min())
-    max_val = float(nxy.max())
-    if math.isclose(max_val, min_val):
-        return np.zeros_like(nxy, dtype=np.float32)
-    nxy = (nxy - min_val) / (max_val - min_val)
-    return nxy.astype(np.float32)
-
-
-def perlin_fbm(
-    height: int, width: int, scales: list[int], rng: np.random.Generator
-) -> np.ndarray:
-    total = np.zeros((height, width), dtype=np.float32)
-    weight_sum = 0.0
-    for scale in scales:
-        noise = perlin_noise(height, width, scale, rng)
-        weight = math.log2(scale) ** 2 if scale > 1 else 1.0
-        total += noise * weight
-        weight_sum += weight
-    if weight_sum <= 0:
-        return np.zeros((height, width), dtype=np.float32)
-    total /= weight_sum
-    return np.clip(total, 0.0, 1.0)
-
-
-def perlin_noise_torch(
-    height: int,
-    width: int,
-    scale: float,
-    rng: "torch.Generator",
-    device: "torch.device",
-    batch_size: int = 1,
-):
-    scale = float(scale)
-    if scale <= 0:
-        raise ValueError(f"Perlin scale must be > 0, got {scale}")
-    grid_w = int(math.ceil(width / scale)) + 1
-    grid_h = int(math.ceil(height / scale)) + 1
-
-    angles = torch.rand(
-        (batch_size, grid_h, grid_w), device=device, generator=rng, dtype=torch.float32
-    )
-    angles = angles * (2.0 * math.pi)
-    grads = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
-
-    x = torch.arange(width, device=device, dtype=torch.float32) / scale
-    y = torch.arange(height, device=device, dtype=torch.float32) / scale
-    x0 = torch.floor(x).to(torch.int64)
-    y0 = torch.floor(y).to(torch.int64)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    xf = x - x0
-    yf = y - y0
-
-    x0g = x0[None, :]
-    x1g = x1[None, :]
-    y0g = y0[:, None]
-    y1g = y1[:, None]
-    xf_g = xf[None, :]
-    yf_g = yf[:, None]
-    u = fade(xf_g)
-    v = fade(yf_g)
-
-    g00 = grads[:, y0g, x0g]
-    g10 = grads[:, y0g, x1g]
-    g01 = grads[:, y1g, x0g]
-    g11 = grads[:, y1g, x1g]
-
-    d00 = g00[..., 0] * xf_g + g00[..., 1] * yf_g
-    d10 = g10[..., 0] * (xf_g - 1) + g10[..., 1] * yf_g
-    d01 = g01[..., 0] * xf_g + g01[..., 1] * (yf_g - 1)
-    d11 = g11[..., 0] * (xf_g - 1) + g11[..., 1] * (yf_g - 1)
-
-    nx0 = lerp(d00, d10, u)
-    nx1 = lerp(d01, d11, u)
-    nxy = lerp(nx0, nx1, v)
-
-    min_val = nxy.amin(dim=(1, 2), keepdim=True)
-    max_val = nxy.amax(dim=(1, 2), keepdim=True)
-    denom = max_val - min_val
-    nxy = (nxy - min_val) / denom.clamp_min(1e-8)
-    nxy = torch.where(denom <= 1e-8, torch.zeros_like(nxy), nxy)
-
-    if batch_size == 1:
-        return nxy[0]
-    return nxy
-
-
-def perlin_fbm_torch(
-    height: int,
-    width: int,
-    scales: list[int],
-    rng: "torch.Generator",
-    device: "torch.device",
-    batch_size: int = 1,
-):
-    total = torch.zeros((batch_size, height, width), device=device, dtype=torch.float32)
-    weight_sum = 0.0
-    for scale in scales:
-        noise = perlin_noise_torch(height, width, scale, rng, device, batch_size)
-        if noise.ndim == 2:
-            noise = noise.unsqueeze(0)
-        weight = math.log2(scale) ** 2 if scale > 1 else 1.0
-        total += noise * weight
-        weight_sum += weight
-    if weight_sum <= 0:
-        total = torch.zeros(
-            (batch_size, height, width), device=device, dtype=torch.float32
-        )
-    else:
-        total = total / weight_sum
-    total = torch.clamp(total, 0.0, 1.0)
-    if batch_size == 1:
-        return total[0]
-    return total
 
 
 def visibility_to_k(visibility_m: float, contrast_threshold: float) -> float:
@@ -271,45 +98,6 @@ def visibility_to_k(visibility_m: float, contrast_threshold: float) -> float:
         raise ValueError(f"Visibility must be > 0, got {visibility_m}")
     return -math.log(contrast_threshold) / visibility_m
 
-
-def sample_value(spec, rng: np.random.Generator):
-    if isinstance(spec, (int, float)):
-        return float(spec)
-    if isinstance(spec, list):
-        return [sample_value(item, rng) for item in spec]
-    if isinstance(spec, dict):
-        if "dist" not in spec:
-            if "value" in spec:
-                return sample_value(spec["value"], rng)
-            return {k: sample_value(v, rng) for k, v in spec.items()}
-        dist = spec["dist"]
-        if dist == "constant":
-            return sample_value(spec.get("value", 0.0), rng)
-        if dist == "uniform":
-            return float(rng.uniform(spec["min"], spec["max"]))
-        if dist == "normal":
-            val = float(rng.normal(spec["mean"], spec["std"]))
-            if "min" in spec or "max" in spec:
-                val = float(
-                    np.clip(val, spec.get("min", -np.inf), spec.get("max", np.inf))
-                )
-            return val
-        if dist == "lognormal":
-            val = float(rng.lognormal(spec["mean"], spec["sigma"]))
-            if "min" in spec or "max" in spec:
-                val = float(
-                    np.clip(val, spec.get("min", -np.inf), spec.get("max", np.inf))
-                )
-            return val
-        if dist == "choice":
-            values = spec["values"]
-            weights = spec.get("weights")
-            idx = int(rng.choice(len(values), p=weights))
-            return sample_value(values[idx], rng)
-        raise ValueError(f"Unsupported dist: {dist}")
-    if isinstance(spec, str):
-        return spec
-    raise ValueError(f"Unsupported spec type: {type(spec)}")
 
 
 def normalize_atmospheric_light(value: np.ndarray) -> np.ndarray:
@@ -424,55 +212,6 @@ def modulate_with_noise_torch(
     return mean_value * factors[..., None]
 
 
-def planar_to_radial_depth(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
-    """Convert planar (z-buffer) depth to radial (Euclidean) depth.
-
-    For each pixel ``(u, v)`` the radial distance equals
-    ``depth[v, u] * sqrt(((u - cx)/fx)**2 + ((v - cy)/fy)**2 + 1)``.
-
-    Args:
-        depth: ``(H, W)`` float32 planar depth in metres.
-        K: ``(3, 3)`` float32 camera intrinsics matrix.
-
-    Returns:
-        ``(H, W)`` float32 radial depth in metres.
-    """
-    H, W = depth.shape
-    fx, fy = float(K[0, 0]), float(K[1, 1])
-    cx, cy = float(K[0, 2]), float(K[1, 2])
-    u = np.arange(W, dtype=np.float32)
-    v = np.arange(H, dtype=np.float32)
-    u_grid, v_grid = np.meshgrid(u, v)
-    factor = np.sqrt(((u_grid - cx) / fx) ** 2 + ((v_grid - cy) / fy) ** 2 + 1.0)
-    return depth * factor
-
-
-def planar_to_radial_depth_torch(
-    depth: "torch.Tensor", K: "torch.Tensor",
-) -> "torch.Tensor":
-    """Torch version of :func:`planar_to_radial_depth`.
-
-    Args:
-        depth: ``(H, W)`` or ``(B, H, W)`` float32 planar depth.
-        K: ``(3, 3)`` float32 intrinsics matrix (single, shared across batch).
-
-    Returns:
-        Same shape as *depth*, converted to radial depth.
-    """
-    if depth.ndim == 3:
-        H, W = depth.shape[1], depth.shape[2]
-    else:
-        H, W = depth.shape
-    fx = K[0, 0]
-    fy = K[1, 1]
-    cx = K[0, 2]
-    cy = K[1, 2]
-    u = torch.arange(W, device=depth.device, dtype=depth.dtype)
-    v = torch.arange(H, device=depth.device, dtype=depth.dtype)
-    v_grid, u_grid = torch.meshgrid(v, u, indexing="ij")
-    factor = torch.sqrt(((u_grid - cx) / fx) ** 2 + ((v_grid - cy) / fy) ** 2 + 1.0)
-    return depth * factor
-
 
 def apply_fog(
     rgb: np.ndarray, depth_m: np.ndarray, k_field: np.ndarray, ls_field: np.ndarray
@@ -517,15 +256,6 @@ def select_model(config: dict, rng: np.random.Generator) -> str:
         return str(rng.choice(names, p=probs))
     raise ValueError(f"Unsupported selection mode: {mode}")
 
-
-def deep_merge(base: dict, override: dict) -> dict:
-    merged = dict(base)
-    for key, value in override.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def resolve_model_config(model_name: str, models_cfg: dict) -> dict:
@@ -601,114 +331,6 @@ def apply_model(
     return apply_fog(rgb, depth_m, k_field, ls_field), k_mean, ls_base
 
 
-def _is_chw(arr: np.ndarray) -> bool:
-    """Heuristic: 3-D array is CHW when first dim is small and spatial dims are large."""
-    return (
-        arr.ndim == 3
-        and arr.shape[0] in (1, 3, 4)
-        and arr.shape[1] > 4
-        and arr.shape[2] > 4
-    )
-
-
-def _to_numpy(data) -> np.ndarray:
-    """Convert *data* (numpy, torch tensor, or PIL Image) to a numpy array."""
-    if torch is not None and torch.is_tensor(data):
-        return data.detach().cpu().numpy()
-    return np.asarray(data)
-
-
-def normalize_rgb(image) -> np.ndarray:
-    image = _to_numpy(image)
-    if _is_chw(image):
-        image = np.transpose(image, (1, 2, 0))
-    if image.ndim == 2:
-        image = np.stack([image, image, image], axis=-1)
-    elif image.ndim == 3 and image.shape[-1] == 4:
-        image = image[..., :3]
-    image = image.astype(np.float32)
-    if image.max() > 1.0:
-        image = image / 255.0
-    return np.clip(image, 0.0, 1.0)
-
-
-def normalize_rgb_torch(image, device: "torch.device") -> "torch.Tensor":
-    if torch.is_tensor(image):
-        image_t = image.to(device=device, dtype=torch.float32)
-        # CHW → HWC
-        if image_t.ndim == 3 and image_t.shape[0] in (1, 3, 4) and image_t.shape[2] > 4:
-            image_t = image_t.permute(1, 2, 0)
-        is_int = not image_t.is_floating_point()
-    else:
-        image_np = np.asarray(image)
-        is_int = np.issubdtype(image_np.dtype, np.integer)
-        image_t = torch.from_numpy(image_np).to(device)
-    if image_t.ndim == 2:
-        image_t = image_t.unsqueeze(-1).repeat(1, 1, 3)
-    elif image_t.ndim == 3 and image_t.shape[-1] == 4:
-        image_t = image_t[..., :3]
-    image_t = image_t.to(torch.float32)
-    if is_int:
-        image_t = image_t / 255.0
-    else:
-        if float(image_t.max()) > 1.0:
-            image_t = image_t / 255.0
-    return torch.clamp(image_t, 0.0, 1.0)
-
-
-def normalize_depth(
-    depth, target_shape: tuple[int, int], resize_depth_flag: bool
-) -> np.ndarray:
-    depth = _to_numpy(depth).astype(np.float32)
-    # (1, H, W) → (H, W)  (GPU-loader channel-first format)
-    if depth.ndim == 3 and depth.shape[0] == 1:
-        depth = depth[0]
-    if depth.ndim == 3 and depth.shape[-1] == 1:
-        depth = depth[..., 0]
-    if resize_depth_flag and depth.shape != target_shape:
-        depth = resize_depth(depth, target_shape)
-    if depth.shape != target_shape:
-        raise ValueError(
-            f"Depth shape {depth.shape} does not match image shape {target_shape}"
-        )
-    depth[~np.isfinite(depth)] = 0.0
-    depth = np.maximum(depth, 0.0)
-    return depth
-
-
-def normalize_sky_mask(sky_mask) -> np.ndarray:
-    """Normalise a sky mask to a 2-D boolean numpy array ``(H, W)``.
-
-    Handles torch tensors (GPU loaders) and the ``(1, H, W)`` channel-first
-    layout produced by euler-loading's GPU loaders.
-    """
-    mask = _to_numpy(sky_mask)
-    # (1, H, W) → (H, W)
-    if mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask[0]
-    if mask.ndim == 3 and mask.shape[-1] == 1:
-        mask = mask[..., 0]
-    return mask.astype(bool)
-
-
-def _extract_intrinsics(sample: dict) -> np.ndarray | None:
-    """Extract the 3x3 intrinsics matrix from a sample dict.
-
-    Hierarchical modalities are stored as ``sample[name][file_id]``.
-    For intrinsics the convention is ``sample["intrinsics"]["intrinsics"]``.
-    """
-    intr_dict = sample.get("intrinsics")
-    if intr_dict is None:
-        return None
-    raw = intr_dict.get("intrinsics") if isinstance(intr_dict, dict) else intr_dict
-    if raw is None:
-        return None
-    return _to_numpy(raw).astype(np.float32)
-
-
-def format_value(value: float) -> str:
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    return text or "0"
 
 
 class Foggify:
@@ -799,12 +421,12 @@ class Foggify:
         elif airlight_method == "dcp":
             self.airlight_estimator = DCPAirlight()
             if torch is not None:
-                from euler_fog.fog.dcp_airlight_torch import DCPAirlightTorch
+                from euler_preprocess.fog.dcp_airlight_torch import DCPAirlightTorch
                 self.airlight_estimator_torch = DCPAirlightTorch()
         elif airlight_method == "dcp_heuristic":
             self.airlight_estimator = DCPHeuristicAirlight()
             if torch is not None:
-                from euler_fog.fog.dcp_heuristic_airlight_torch import (
+                from euler_preprocess.fog.dcp_heuristic_airlight_torch import (
                     DCPHeuristicAirlightTorch,
                 )
                 self.airlight_estimator_torch = DCPHeuristicAirlightTorch()
@@ -824,50 +446,7 @@ class Foggify:
         return self._generate_fog_cpu(samples)
 
     def _configure_device(self) -> None:
-        device = str(self.device).strip()
-        device_key = device.lower()
-        if device_key == "gpu":
-            device = "cuda"
-            device_key = "cuda"
-        if device_key == "cpu":
-            self.use_gpu = False
-            self.torch_device = None
-            return
-        if torch is None:
-            raise RuntimeError(
-                f"Torch is required for device '{device}', but it is not installed."
-            )
-        torch_device = torch.device(device)
-        if torch_device.type == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA requested but not available.")
-        self.torch_device = torch_device
-        self.use_gpu = torch_device.type != "cpu"
-
-    @staticmethod
-    def _iter_batches(items: Iterable, batch_size: int):
-        if batch_size <= 0:
-            batch_size = 1
-        batch: list = []
-        for item in items:
-            batch.append(item)
-            if len(batch) == batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
-
-    def _torch_generator_for_index(self, index: int) -> "torch.Generator":
-        if self.torch_device is None:
-            raise RuntimeError("Torch device not configured.")
-        gen = torch.Generator(device=self.torch_device)
-        if self.seed is not None:
-            seed_seq = np.random.SeedSequence([self.seed, index])
-            seed_val = int(seed_seq.generate_state(1, dtype=np.uint64)[0])
-            seed_val = seed_val & 0x7FFFFFFFFFFFFFFF
-        else:
-            seed_val = int(self.base_rng.integers(0, np.iinfo(np.int64).max))
-        gen.manual_seed(seed_val)
-        return gen
+        self.torch_device, self.use_gpu = configure_device(self.device)
 
     def _generate_fog_cpu(self, samples: Iterable[dict]) -> list[Path]:
         total = len(samples)  # type: ignore[arg-type]
@@ -883,7 +462,7 @@ class Foggify:
                 depth = depth * self.depth_scale
                 depth = np.maximum(depth, 0.0)
 
-                intrinsics = _extract_intrinsics(sample)
+                intrinsics = extract_intrinsics(sample)
                 if intrinsics is not None:
                     depth = planar_to_radial_depth(depth, intrinsics)
 
@@ -1013,7 +592,7 @@ class Foggify:
         saved_paths: list[Path] = []
 
         with progress_bar(total, "GPU", self.logger) as bar:
-            for batch in self._iter_batches(enumerate(samples), self.gpu_batch_size):
+            for batch in iter_batches(enumerate(samples), self.gpu_batch_size):
                 items: list[dict] = []
                 for global_index, sample in batch:
                     rgb = _to_numpy(sample["rgb"])
@@ -1022,7 +601,7 @@ class Foggify:
                     depth = normalize_depth(
                         sample["depth"], rgb.shape[:2], self.resize_depth_flag
                     )
-                    intrinsics = _extract_intrinsics(sample)
+                    intrinsics = extract_intrinsics(sample)
                     if self.seed is not None:
                         rng = np.random.default_rng(
                             np.random.SeedSequence([self.seed, global_index])
@@ -1226,7 +805,7 @@ class Foggify:
                             estimated_airlight = (
                                 self.airlight_estimator_torch.compute(rgb_t)
                             )
-                        torch_gen = self._torch_generator_for_index(item["index"])
+                        torch_gen = torch_generator_for_index(self.torch_device, self.seed, self.base_rng, item["index"])
                         foggy_t, beta, airlight_t = self._apply_model_torch(
                             rgb_t,
                             depth_t,

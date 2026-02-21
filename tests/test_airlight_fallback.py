@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from euler_fog.fog.airlight_from_sky import AirlightFromSky, DEFAULT_AIRLIGHT_FALLBACK
-from euler_fog.fog.foggify import (
+from euler_preprocess.fog.airlight_from_sky import AirlightFromSky, DEFAULT_AIRLIGHT_FALLBACK
+from euler_preprocess.fog.foggify import (
     Foggify,
     normalize_atmospheric_light,
     format_value,
@@ -16,7 +16,7 @@ from euler_fog.fog.foggify import (
 
 try:
     import torch
-    from euler_fog.fog.foggify import estimate_airlight_torch
+    from euler_preprocess.fog.foggify import estimate_airlight_torch
 except ImportError:
     torch = None
 

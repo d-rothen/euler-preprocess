@@ -1,5 +1,5 @@
 {
-  "fog_config_path": "../euler_fog/fog/example_config.json",
+  "fog_config_path": "../euler_preprocess/fog/example_config.json",
   "output_path": "/path/to/output",
   "modalities": {
     "rgb": "/path/to/vkitti_2.0.3_rgb",

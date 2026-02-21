@@ -14,7 +14,7 @@ import pytest
 from PIL import Image
 
 from euler_loading import Modality, MultiModalDataset
-from euler_fog.fog.foggify import Foggify
+from euler_preprocess.fog.foggify import Foggify
 
 # ── Modality root paths ──────────────────────────────────────────────────────
 
@@ -25,7 +25,7 @@ SKY_MASK_PATH = "/Volumes/Volume/Datasets/vkitti2/vkitti_2.0.3_classSegmentation
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-FOG_CONFIG_PATH = PROJECT_ROOT / "euler_fog" / "fog" / "example_config.json"
+FOG_CONFIG_PATH = PROJECT_ROOT / "euler_preprocess" / "fog" / "example_config.json"
 OUTPUT_DIR = PROJECT_ROOT / ".tests"
 
 MAX_SAMPLES = 5  # limit for practical test runtime
