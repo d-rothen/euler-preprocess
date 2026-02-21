@@ -10,7 +10,7 @@ from pathlib import Path
 
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.logging import get_logger, log_dataset_info
-from euler_preprocess.fog.foggify import Foggify
+from euler_preprocess.fog.transform import FogTransform
 
 
 # ---------------------------------------------------------------------------
@@ -77,12 +77,12 @@ def main() -> int:
     }
     log_dataset_info(logger, dataset_name, len(dataset), modality_paths, use_gpu)
 
-    foggify = Foggify(
+    transform = FogTransform(
         config_path=fog_config_path,
         out_path=output_path,
     )
 
-    saved_paths = foggify.generate_fog(dataset)
+    saved_paths = transform.run(dataset)
 
     logger.info("Fog generation complete. Generated %d images.", len(saved_paths))
     return 0
