@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
@@ -9,7 +8,7 @@ import numpy as np
 
 from euler_preprocess.common.device import configure_device, iter_batches, torch_generator_for_index
 from euler_preprocess.common.intrinsics import extract_intrinsics, planar_to_radial_depth, planar_to_radial_depth_torch
-from euler_preprocess.common.io import load_json, save_image
+from euler_preprocess.common.io import OutputWriter, load_json
 from euler_preprocess.common.logging import get_logger, progress_bar
 from euler_preprocess.common.noise import perlin_fbm_torch
 from euler_preprocess.common.normalize import (
@@ -78,7 +77,8 @@ class FogTransform(Transform):
         suffix: str = "",
     ) -> None:
         self.config_path = Path(config_path)
-        self.out_path = Path(out_path)
+        self.writer = OutputWriter(out_path)
+        self.out_path = self.writer.root
         self.suffix = suffix or ""
 
         self.config = load_json(self.config_path)
@@ -215,13 +215,14 @@ class FogTransform(Transform):
                     sample["id"], model_name, beta, airlight,
                     full_id=sample.get("full_id"),
                 )
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                save_image(output_path, foggy)
+                self.writer.mkdir(output_path.parent)
+                self.writer.save_image(output_path, foggy)
                 saved_paths.append(output_path)
                 self._write_model_config(model_name, model_cfg, saved_paths)
 
                 if bar is not None:
                     bar.update(1)
+        self.writer.close()
         return saved_paths
 
     def _apply_model_torch(
@@ -495,8 +496,8 @@ class FogTransform(Transform):
                                 airlight_np,
                                 full_id=item.get("full_id"),
                             )
-                            output_path.parent.mkdir(parents=True, exist_ok=True)
-                            save_image(output_path, foggy_img)
+                            self.writer.mkdir(output_path.parent)
+                            self.writer.save_image(output_path, foggy_img)
                             saved_paths.append(output_path)
                             self._write_model_config(
                                 item["model_name"], item["model_cfg"], saved_paths
@@ -545,8 +546,8 @@ class FogTransform(Transform):
                             airlight_np,
                             full_id=item.get("full_id"),
                         )
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        save_image(output_path, foggy_img)
+                        self.writer.mkdir(output_path.parent)
+                        self.writer.save_image(output_path, foggy_img)
                         saved_paths.append(output_path)
                         self._write_model_config(
                             item["model_name"], item["model_cfg"], saved_paths
@@ -555,6 +556,7 @@ class FogTransform(Transform):
                 if bar is not None:
                     bar.update(len(batch))
 
+        self.writer.close()
         return saved_paths
 
     def _build_output_path(
@@ -588,13 +590,11 @@ class FogTransform(Transform):
         if model_name in self._written_configs:
             return
         target_dir = self.out_path / model_name
-        target_dir.mkdir(parents=True, exist_ok=True)
+        self.writer.mkdir(target_dir)
         config_path = target_dir / "config.json"
 
         enriched_config = {**model_cfg, "size": len(saved_paths)}
-
-        with open(config_path, "w", encoding="utf-8") as handle:
-            json.dump(enriched_config, handle, indent=2, sort_keys=True)
+        self.writer.write_json(config_path, enriched_config)
         self._written_configs.add(model_name)
 
 
