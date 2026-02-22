@@ -185,7 +185,7 @@ class TestFoggifyEmptySkyMask:
         depth = np.random.rand(64, 64).astype(np.float32) * 100.0
         sky_mask = np.zeros((64, 64), dtype=bool)  # no sky at all
 
-        samples = [{"rgb": image, "depth": depth, "sky_mask": sky_mask, "id": "nosky_001"}]
+        samples = [{"rgb": image, "depth": depth, "semantic_segmentation": sky_mask, "id": "nosky_001"}]
 
         # The foggify logger has propagate=False, so temporarily enable it
         fog_logger = logging.getLogger("foggify")
@@ -236,7 +236,7 @@ class TestFoggifyOutputHierarchy:
         sample = {
             "rgb": rng.random((h, w, 3)).astype(np.float32),
             "depth": rng.uniform(1.0, 50.0, (h, w)).astype(np.float32),
-            "sky_mask": np.ones((h, w), dtype=bool),
+            "semantic_segmentation": np.ones((h, w), dtype=bool),
             "id": sample_id,
         }
         if full_id is not None:

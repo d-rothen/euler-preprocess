@@ -48,13 +48,13 @@ except ImportError:
 
 
 class FogTransform(Transform):
-    """Generate foggy versions of images from RGB + depth + sky_mask samples.
+    """Generate foggy versions of images from RGB + depth + semantic segmentation samples.
 
     Accepts an iterable of sample dicts (compatible with euler-loading's
     MultiModalDataset). Each sample must contain at minimum:
-        "rgb":        np.ndarray (H, W, 3)
-        "depth":      np.ndarray (H, W), float in meters
-        "sky_mask":   np.ndarray (H, W), boolean
+        "rgb":                      np.ndarray (H, W, 3)
+        "depth":                    np.ndarray (H, W), float in meters
+        "semantic_segmentation":    np.ndarray (H, W), boolean sky mask
         "id":         str
         "intrinsics": dict -- hierarchical modality containing ``"intrinsics"``
                       key mapping to a (3, 3) camera intrinsics matrix *K*.
@@ -68,7 +68,7 @@ class FogTransform(Transform):
                     model output folder so the dataset structure is preserved.
     """
 
-    REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth", "sky_mask"}
+    REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth", "semantic_segmentation"}
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
 
     def __init__(
@@ -157,7 +157,7 @@ class FogTransform(Transform):
 
         Args:
             samples: Iterable of dicts, each containing "rgb", "depth",
-                     "sky_mask", and "id" keys.
+                     "semantic_segmentation", and "id" keys.
 
         Returns:
             List of output file paths.
@@ -187,7 +187,7 @@ class FogTransform(Transform):
                 if intrinsics is not None:
                     depth = planar_to_radial_depth(depth, intrinsics)
 
-                sky_mask = normalize_sky_mask(sample["sky_mask"])
+                sky_mask = normalize_sky_mask(sample["semantic_segmentation"])
                 estimated_airlight = self.airlight_estimator.estimate_airlight(
                     rgb, sky_mask, sample_id=sample.get("id")
                 )
@@ -338,7 +338,7 @@ class FogTransform(Transform):
                             "rgb": rgb,
                             "depth": depth,
                             "intrinsics": intrinsics,
-                            "sky_mask": normalize_sky_mask(sample["sky_mask"]),
+                            "sky_mask": normalize_sky_mask(sample["semantic_segmentation"]),
                             "rng": rng,
                             "model_name": model_name,
                             "model_cfg": model_cfg,

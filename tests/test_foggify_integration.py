@@ -53,7 +53,7 @@ def _build_dataset() -> MultiModalDataset:
         modalities={
             "rgb": Modality(RGB_PATH),
             "depth": Modality(DEPTH_PATH),
-            "sky_mask": Modality(SKY_MASK_PATH),
+            "semantic_segmentation": Modality(SKY_MASK_PATH),
         },
     )
 
@@ -69,7 +69,7 @@ def test_foggify_with_real_data(tmp_path):
         f"No matching files found across modalities:\n"
         f"  rgb:      {RGB_PATH}\n"
         f"  depth:    {DEPTH_PATH}\n"
-        f"  sky_mask: {SKY_MASK_PATH}"
+        f"  semantic_segmentation: {SKY_MASK_PATH}"
     )
 
     n_samples = min(MAX_SAMPLES, len(dataset))

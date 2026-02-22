@@ -4,7 +4,7 @@
   "modalities": {
     "rgb": "/Volumes/Volume/Datasets/real-drive-sim/rgb",
     "depth": "/Volumes/Volume/Datasets/real-drive-sim/depth",
-    "sky_mask": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d"
+    "semantic_segmentation": "/Volumes/Volume/Datasets/real-drive-sim/semantic_segmentation_2d"
   },
   "hierarchical_modalities": {
     "intrinsics": "/Volumes/Volume/Datasets/real-drive-sim/calibration"

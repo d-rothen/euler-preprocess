@@ -37,7 +37,7 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
   "modalities": {
     "rgb": "/path/to/rgb",
     "depth": "/path/to/depth",
-    "sky_mask": "/path/to/classSegmentation"
+    "semantic_segmentation": "/path/to/classSegmentation"
   },
   "hierarchical_modalities": {
     "intrinsics": "/path/to/intrinsics"
@@ -56,8 +56,8 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 
 | Transform | `modalities` | `hierarchical_modalities` |
 |---|---|---|
-| `fog` | `rgb`, `depth`, `sky_mask` | — (intrinsics optional) |
-| `sky-depth` | `depth`, `sky_mask` | — |
+| `fog` | `rgb`, `depth`, `semantic_segmentation` | — (intrinsics optional) |
+| `sky-depth` | `depth`, `semantic_segmentation` | — |
 | `radial` | `depth` | `intrinsics` |
 
 ---
@@ -115,7 +115,7 @@ Distant objects are attenuated more (`t` approaches 0) and replaced by airlight,
 
 **Depth** — A per-pixel depth map in **metres**. Provides the *d(x)* term in the transmittance calculation `t(x) = exp(-k * d(x))`. Pixels with greater depth receive more fog. Invalid values (NaN, inf, negative) are clamped to zero (treated as infinitely close, receiving no fog).
 
-**Sky Mask** — A boolean per-pixel mask indicating sky pixels, loaded directly via euler-loading's dataset-specific `sky_mask` loader. The sky mask is used for airlight estimation when the `airlight` method is `"from_sky"`: the mean RGB of all sky pixels in the clean image is used as the airlight colour *L_s*.
+**Semantic Segmentation** — A per-pixel semantic segmentation map from which a boolean sky mask is derived, loaded via euler-loading's dataset-specific `semantic_segmentation` loader. The sky mask is used for airlight estimation when the `airlight` method is `"from_sky"`: the mean RGB of all sky pixels in the clean image is used as the airlight colour *L_s*.
 
 **Intrinsics** *(optional)* — When present, planar (z-buffer) depth is converted to radial (Euclidean) depth before fog is applied.
 

@@ -26,7 +26,7 @@ def samples():
         [[True, True, False], [False, False, False], [False, False, True]], dtype=bool
     )
     return [
-        {"id": "frame_001", "depth": depth.copy(), "sky_mask": sky_mask.copy()},
+        {"id": "frame_001", "depth": depth.copy(), "semantic_segmentation": sky_mask.copy()},
     ]
 
 
@@ -64,7 +64,7 @@ class TestSkyDepthTransform:
     def test_no_sky_pixels(self, tmp_path, sky_depth_config):
         depth = np.ones((4, 4), dtype=np.float32) * 10.0
         sky_mask = np.zeros((4, 4), dtype=bool)
-        samples = [{"id": "no_sky", "depth": depth, "sky_mask": sky_mask}]
+        samples = [{"id": "no_sky", "depth": depth, "semantic_segmentation": sky_mask}]
 
         out_path = tmp_path / "output"
         transform = SkyDepthTransform(str(sky_depth_config), str(out_path))
@@ -80,7 +80,7 @@ class TestSkyDepthTransform:
             {
                 "id": "00001",
                 "depth": depth,
-                "sky_mask": sky_mask,
+                "semantic_segmentation": sky_mask,
                 "full_id": "/Scene01/Camera_0/00001",
             }
         ]
@@ -99,7 +99,7 @@ class TestSkyDepthTransform:
             depth = np.full((4, 4), float(i + 1), dtype=np.float32)
             sky_mask = np.zeros((4, 4), dtype=bool)
             sky_mask[0, 0] = True
-            samples.append({"id": f"frame_{i:03d}", "depth": depth, "sky_mask": sky_mask})
+            samples.append({"id": f"frame_{i:03d}", "depth": depth, "semantic_segmentation": sky_mask})
 
         out_path = tmp_path / "output"
         transform = SkyDepthTransform(str(sky_depth_config), str(out_path))
@@ -116,7 +116,7 @@ class TestSkyDepthTransform:
         depth = np.ones((1, 4, 4), dtype=np.float32) * 5.0
         sky_mask = np.zeros((4, 4), dtype=bool)
         sky_mask[0, :] = True
-        samples = [{"id": "chw_test", "depth": depth, "sky_mask": sky_mask}]
+        samples = [{"id": "chw_test", "depth": depth, "semantic_segmentation": sky_mask}]
 
         out_path = tmp_path / "output"
         transform = SkyDepthTransform(str(sky_depth_config), str(out_path))

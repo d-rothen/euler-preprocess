@@ -4,7 +4,7 @@
   "modalities": {
     "rgb": "/path/to/vkitti_2.0.3_rgb",
     "depth": "/path/to/vkitti_2.0.3_depth",
-    "sky_mask": "/path/to/vkitti_2.0.3_classSegmentation"
+    "semantic_segmentation": "/path/to/vkitti_2.0.3_classSegmentation"
   },
   "hierarchical_modalities": {
     "intrinsics": "/path/to/vkitti_2.0.3_intrinsics"

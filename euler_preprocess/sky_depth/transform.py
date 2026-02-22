@@ -22,7 +22,7 @@ class SkyDepthTransform(Transform):
     Each output sample is saved as a ``.npy`` float32 depth map.
     """
 
-    REQUIRED_MODALITIES: ClassVar[set[str]] = {"depth", "sky_mask"}
+    REQUIRED_MODALITIES: ClassVar[set[str]] = {"depth", "semantic_segmentation"}
 
     def __init__(self, config_path: str, out_path: str) -> None:
         self.config_path = Path(config_path)
@@ -46,7 +46,7 @@ class SkyDepthTransform(Transform):
         with progress_bar(total, "sky-depth", self.logger) as bar:
             for sample in samples:
                 depth = normalize_depth(sample["depth"])
-                sky_mask = normalize_sky_mask(sample["sky_mask"])
+                sky_mask = normalize_sky_mask(sample["semantic_segmentation"])
                 depth[sky_mask] = self.sky_depth_value
 
                 output_path = self._build_output_path(

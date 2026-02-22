@@ -3,6 +3,6 @@
   "output_path": "/path/to/output",
   "modalities": {
     "depth": "/path/to/depth",
-    "sky_mask": "/path/to/classSegmentation"
+    "semantic_segmentation": "/path/to/classSegmentation"
   }
 }

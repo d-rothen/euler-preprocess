@@ -10,7 +10,7 @@ def synthetic_samples(tmp_path):
     """Create a list of synthetic sample dicts for Foggify testing.
 
     Returns a list of 3 sample dicts matching the expected format:
-        {"rgb": ndarray, "depth": ndarray, "sky_mask": ndarray, "id": str}
+        {"rgb": ndarray, "depth": ndarray, "semantic_segmentation": ndarray, "id": str}
     """
     rng = np.random.default_rng(42)
     samples = []
@@ -24,7 +24,7 @@ def synthetic_samples(tmp_path):
             {
                 "rgb": rgb,
                 "depth": depth,
-                "sky_mask": sky_mask,
+                "semantic_segmentation": sky_mask,
                 "id": f"sample_{i:05d}",
             }
         )
