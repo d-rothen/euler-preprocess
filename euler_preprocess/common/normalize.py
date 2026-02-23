@@ -101,8 +101,11 @@ def normalize_sky_mask(sky_mask) -> np.ndarray:
     layout produced by euler-loading's GPU loaders.
     """
     mask = _to_numpy(sky_mask)
+    # CHW → take first channel: (C, H, W) → (H, W)
+    if _is_chw(mask):
+        mask = mask[0]
     # (1, H, W) → (H, W)
-    if mask.ndim == 3 and mask.shape[0] == 1:
+    elif mask.ndim == 3 and mask.shape[0] == 1:
         mask = mask[0]
     if mask.ndim == 3 and mask.shape[-1] == 1:
         mask = mask[..., 0]
