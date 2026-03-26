@@ -34,6 +34,7 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 {
   "transform_config_path": "configs/run1.json",
   "output_path": "/path/to/output",
+  "output_slot": "rgb",
   "modalities": {
     "rgb": {"path": "/path/to/rgb", "split": "train"},
     "depth": {"path": "/path/to/depth"},
@@ -41,6 +42,20 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
   },
   "hierarchical_modalities": {
     "intrinsics": {"path": "/path/to/intrinsics"}
+  },
+  "pipeline": {
+    "output_root": "/pipeline/output",
+    "outputs_manifest_path": "/pipeline/output/.euler_pipeline/pipeline_outputs.json",
+    "output_targets": [
+      {
+        "slot": "rgb",
+        "modelModalityId": 71,
+        "datasetType": "rgb",
+        "relativePath": "foggy_rgb",
+        "path": "/pipeline/output/foggy_rgb",
+        "storage": "directory"
+      }
+    ]
   }
 }
 ```
@@ -48,9 +63,11 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 | Field | Description |
 |---|---|
 | `transform_config_path` | Path to the transform-specific config (see below). `fog_config_path` is also accepted for backward compatibility. |
-| `output_path` | Directory where outputs are written. |
+| `output_path` | Output root used when no pipeline target overrides it. Optional if `pipeline.output_root` or `pipeline.output_targets[].path` supplies the destination. |
+| `output_slot` | Optional slot selector when `pipeline.output_targets` contains multiple entries. Defaults to `rgb` for `fog`, `depth` for `sky-depth`, and `depth` for `radial`. |
 | `modalities` | Regular modalities that participate in sample-ID intersection. Each value is an object with a `path` key and an optional `split` key (see below). Which modalities are required depends on the transform (see table below). |
 | `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Same format as `modalities`. Loaded once per scene and cached. |
+| `pipeline` | Optional runtime routing block compatible with `euler-inference` (`output_root`, `outputs_manifest_path`, `output_targets`). |
 
 #### Inline splits
 
@@ -63,6 +80,37 @@ When a modality directory contains [ds-crawler](https://github.com/d-rothen/ds-c
 | `fog` | `rgb`, `depth`, `semantic_segmentation` | — (intrinsics optional) |
 | `sky-depth` | `depth`, `semantic_segmentation` | — |
 | `radial` | `depth` | `intrinsics` |
+
+#### Pipeline Runtime Block
+
+`pipeline` follows the same shape as `euler-inference`:
+
+```json
+{
+  "pipeline": {
+    "output_root": "/pipeline/output",
+    "outputs_manifest_path": "/pipeline/output/.euler_pipeline/pipeline_outputs.json",
+    "output_targets": [
+      {
+        "slot": "depth",
+        "modelModalityId": 72,
+        "datasetType": "depth",
+        "relativePath": "radial_depth.zip",
+        "path": "/pipeline/output/radial_depth.zip",
+        "storage": "zip"
+      }
+    ]
+  }
+}
+```
+
+Notes:
+
+- `output_root` is only a fallback when `output_path` is omitted.
+- A matching `output_targets[].slot` overrides the write root for that run.
+- `storage: "directory"` writes a dataset directory and `storage: "zip"` writes a zip dataset.
+- `storage: "file"` is parsed but rejected at runtime.
+- When `outputs_manifest_path` is set and a pipeline target is matched, finalization writes `.euler_pipeline/pipeline_outputs.json` with the same manifest shape used by `euler-inference`.
 
 ---
 
@@ -202,16 +250,21 @@ The noise field (values in [0, 1]) is mapped to a factor field: `factor(x) = min
 
 ### Fog Output
 
-Foggy images are saved as PNG files organised by model name:
+CLI runs write a source-backed RGB dataset. The output keeps the source RGB
+dataset's relative paths, basenames, extensions, and `output.json` metadata so
+the result stays loadable by `euler-loading`:
 
 ```
 <output_path>/
-  uniform/
-    beta_0.0374_airlight_0.353_0.784_1_rgb_00000.png
-    config.json
-  heterogeneous_k/
-    ...
+  .ds_crawler/output.json
+  Scene01/
+    Camera_0/
+      00000.png
 ```
+
+When a pipeline target is present, `pipeline.output_targets[].path` replaces
+`output_path` entirely. Standalone/direct `FogTransform(...)` usage without the
+CLI still uses the legacy per-model layout with `config.json` sidecars.
 
 ---
 
@@ -233,7 +286,9 @@ Overrides depth values in sky regions with a configurable constant. Useful for d
 
 ### Sky-Depth Output
 
-Depth maps are saved as `.npy` float32 files preserving the original directory hierarchy.
+CLI runs write a source-backed depth dataset mirroring the input depth
+modality's paths, filenames, extensions, and metadata. Standalone/direct
+`SkyDepthTransform(...)` usage keeps the legacy `.npy` output behavior.
 
 ---
 
@@ -255,4 +310,7 @@ No special parameters are required. The transform reads intrinsics from the `int
 
 ### Radial Output
 
-Depth maps are saved as `.npy` float32 files preserving the original directory hierarchy.
+CLI runs write a source-backed depth dataset mirroring the input depth
+modality's layout and writer metadata. The emitted `output.json` also flips
+`meta.radial_depth` to `true`. Standalone/direct `RadialTransform(...)` usage
+keeps the legacy `.npy` output behavior.
