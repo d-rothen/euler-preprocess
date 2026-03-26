@@ -35,12 +35,12 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
   "transform_config_path": "configs/run1.json",
   "output_path": "/path/to/output",
   "modalities": {
-    "rgb": "/path/to/rgb",
-    "depth": "/path/to/depth",
-    "semantic_segmentation": "/path/to/classSegmentation"
+    "rgb": {"path": "/path/to/rgb", "split": "train"},
+    "depth": {"path": "/path/to/depth"},
+    "semantic_segmentation": {"path": "/path/to/classSegmentation"}
   },
   "hierarchical_modalities": {
-    "intrinsics": "/path/to/intrinsics"
+    "intrinsics": {"path": "/path/to/intrinsics"}
   }
 }
 ```
@@ -49,8 +49,12 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 |---|---|
 | `transform_config_path` | Path to the transform-specific config (see below). `fog_config_path` is also accepted for backward compatibility. |
 | `output_path` | Directory where outputs are written. |
-| `modalities` | Regular modalities that participate in sample-ID intersection. Which modalities are required depends on the transform (see table below). |
-| `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Loaded once per scene and cached. |
+| `modalities` | Regular modalities that participate in sample-ID intersection. Each value is an object with a `path` key and an optional `split` key (see below). Which modalities are required depends on the transform (see table below). |
+| `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Same format as `modalities`. Loaded once per scene and cached. |
+
+#### Inline splits
+
+When a modality directory contains [ds-crawler](https://github.com/d-rothen/ds-crawler) split files (`.ds_crawler/split_<name>.json`), you can select a subset of the data by setting the `split` key on that modality. Sample IDs are matched by intersection across all modalities, so specifying a split on a single modality is sufficient to restrict the entire dataset.
 
 **Required modalities per transform:**
 
