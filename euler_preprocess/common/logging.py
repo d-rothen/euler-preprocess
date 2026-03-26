@@ -27,13 +27,21 @@ def log_dataset_info(
     logger: logging.Logger,
     dataset_name: str,
     dataset_size: int,
-    modality_paths: dict[str, str],
+    modality_info: dict[str, str | dict],
     use_gpu: bool,
 ) -> None:
     logger.info("Dataset: %s (%d samples)", dataset_name, dataset_size)
     logger.info("Loader variant: %s", "gpu" if use_gpu else "cpu")
-    for name, path in modality_paths.items():
-        logger.info("  modality '%s': %s", name, path)
+    for name, entry in modality_info.items():
+        if isinstance(entry, str):
+            logger.info("  modality '%s': %s", name, entry)
+        else:
+            path = entry.get("path", "")
+            split = entry.get("split")
+            if split:
+                logger.info("  modality '%s': %s (split=%s)", name, path, split)
+            else:
+                logger.info("  modality '%s': %s", name, path)
 
 
 @contextmanager

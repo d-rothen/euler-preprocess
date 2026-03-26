@@ -58,11 +58,17 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
     dataset = build_dataset(config, required_modalities, required_hierarchical)
     dataset_name = config.get("dataset", "dataset")
 
-    modality_paths = {
+    raw_modalities = {
         **config.get("modalities", {}),
         **config.get("hierarchical_modalities", {}),
     }
-    log_dataset_info(logger, dataset_name, len(dataset), modality_paths, use_gpu)
+    modality_info: dict[str, dict] = {}
+    for name, entry in raw_modalities.items():
+        if isinstance(entry, str):
+            modality_info[name] = {"path": entry}
+        else:
+            modality_info[name] = entry
+    log_dataset_info(logger, dataset_name, len(dataset), modality_info, use_gpu)
 
     transform = transform_class(
         config_path=str(transform_config_path),
