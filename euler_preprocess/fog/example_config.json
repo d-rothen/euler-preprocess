@@ -6,7 +6,6 @@
   "contrast_threshold": 0.05,
   "device": "mps",
   "gpu_batch_size": 4,
-  "output_jsonl": "foggy.jsonl",
   "selection": {
     "mode": "weighted",
     "weights": {

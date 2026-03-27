@@ -36,8 +36,8 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
   "output_path": "/path/to/output",
   "modalities": {
     "rgb": {"path": "/path/to/rgb", "split": "train"},
-    "depth": {"path": "/path/to/depth"},
-    "semantic_segmentation": {"path": "/path/to/classSegmentation"}
+    "depth": "/path/to/depth",
+    "semantic_segmentation": "/path/to/classSegmentation"
   },
   "hierarchical_modalities": {
     "intrinsics": {"path": "/path/to/intrinsics"}
@@ -49,7 +49,7 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 |---|---|
 | `transform_config_path` | Path to the transform-specific config (see below). `fog_config_path` is also accepted for backward compatibility. |
 | `output_path` | Directory where outputs are written. |
-| `modalities` | Regular modalities that participate in sample-ID intersection. Each value is an object with a `path` key and an optional `split` key (see below). Which modalities are required depends on the transform (see table below). |
+| `modalities` | Regular modalities that participate in sample-ID intersection. Each value is either a plain path string or an object with a `path` key and an optional `split` key (see below). Which modalities are required depends on the transform (see table below). |
 | `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Same format as `modalities`. Loaded once per scene and cached. |
 
 #### Inline splits

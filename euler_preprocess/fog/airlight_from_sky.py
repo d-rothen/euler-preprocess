@@ -4,7 +4,7 @@ import logging
 
 import numpy as np
 
-logger = logging.getLogger("foggify")
+logger = logging.getLogger("euler-preprocess.fog")
 
 # Default fallback when no sky pixels are available (white, standard
 # assumption in the Koschmieder atmospheric scattering model).
