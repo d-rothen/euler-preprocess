@@ -5,16 +5,18 @@ import math
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
+_GRAY_WEIGHTS = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
+_BRIGHT_SKY_QUANTILE = 0.75
+
 
 class DCPHeuristicAirlight:
-    """Estimate atmospheric light via Dark Channel Prior with median heuristic.
+    """Estimate atmospheric light via Dark Channel Prior with a robust heuristic.
 
     Like :class:`DCPAirlight`, this selects the top bright pixels from the dark
-    channel.  Instead of picking the single brightest pixel (by sum of
-    channels), it converts candidates to grayscale (NTSC/BT.601 weights) and
-    picks the pixel whose intensity equals the **median** among candidates.
-    The candidate count is forced to be odd so that the median always
-    corresponds to an actual pixel.
+    channel. Instead of collapsing to a single candidate pixel, it keeps the
+    brighter half of the candidate pool and averages them with luminance
+    weights. When a sky mask is available, the brightest sky pixels provide the
+    chromaticity prior and the DCP estimate contributes the target luminance.
     """
 
     def __init__(self, patch_size: int = 15, top_percent: float = 0.001) -> None:
@@ -34,30 +36,8 @@ class DCPHeuristicAirlight:
 
     def compute(self, rgb: np.ndarray) -> np.ndarray:
         image = self._prepare_rgb(rgb)
-        dark_channel = self._dark_channel(image)
-
-        num_pixels = dark_channel.size
-        if num_pixels == 0:
-            raise ValueError("rgb image is empty")
-
-        num_select = self._brightest_pixels_count(num_pixels)
-        flat_dark = dark_channel.ravel()
-
-        if num_select >= num_pixels:
-            candidate_idx = np.arange(num_pixels)
-        else:
-            candidate_idx = np.argpartition(flat_dark, -num_select)[-num_select:]
-
-        # NTSC/BT.601 luminance weights
-        i_gray = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140]).ravel()
-        candidate_gray = i_gray[candidate_idx]
-
-        median_intensity = np.median(candidate_gray)
-        local_best_idx = np.argmin(np.abs(candidate_gray - median_intensity))
-        best_idx = candidate_idx[local_best_idx]
-
-        airlight = image.reshape(-1, 3)[best_idx]
-        return airlight.astype(np.float32)
+        candidate_rgb, candidate_gray = self._candidate_pixels(image)
+        return self._estimate_from_candidates(candidate_rgb, candidate_gray)
 
     def estimate_airlight(
         self,
@@ -65,12 +45,14 @@ class DCPHeuristicAirlight:
         sky_mask: np.ndarray,
         sample_id: str | None = None,
     ) -> np.ndarray:
-        """Unified interface compatible with :class:`AirlightFromSky`.
-
-        *sky_mask* is accepted for interface compatibility but not used;
-        the dark channel prior estimates airlight from the full image.
-        """
-        return self.compute(image)
+        del sample_id
+        prepared = self._prepare_rgb(image)
+        candidate_rgb, candidate_gray = self._candidate_pixels(prepared)
+        airlight = self._estimate_from_candidates(candidate_rgb, candidate_gray)
+        sky_prior = self._estimate_sky_prior(prepared, sky_mask)
+        if sky_prior is None:
+            return airlight
+        return self._merge_with_sky_prior(airlight, sky_prior)
 
     # -- internals ----------------------------------------------------------
 
@@ -93,6 +75,81 @@ class DCPHeuristicAirlight:
         image = image.astype(np.float32)
         image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
         return image
+
+    def _candidate_pixels(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        dark_channel = self._dark_channel(rgb)
+
+        num_pixels = dark_channel.size
+        if num_pixels == 0:
+            raise ValueError("rgb image is empty")
+
+        num_select = self._brightest_pixels_count(num_pixels)
+        flat_dark = dark_channel.ravel()
+
+        if num_select >= num_pixels:
+            candidate_idx = np.arange(num_pixels)
+        else:
+            candidate_idx = np.argpartition(flat_dark, -num_select)[-num_select:]
+
+        flat_rgb = rgb.reshape(-1, 3)
+        candidate_rgb = flat_rgb[candidate_idx]
+        candidate_gray = flat_rgb[candidate_idx] @ _GRAY_WEIGHTS
+        return candidate_rgb, candidate_gray
+
+    def _estimate_from_candidates(
+        self,
+        candidate_rgb: np.ndarray,
+        candidate_gray: np.ndarray,
+    ) -> np.ndarray:
+        median_intensity = float(np.median(candidate_gray))
+        bright_mask = candidate_gray >= median_intensity
+        if not np.any(bright_mask):
+            bright_mask = np.ones_like(candidate_gray, dtype=bool)
+
+        bright_rgb = candidate_rgb[bright_mask]
+        bright_gray = candidate_gray[bright_mask]
+        weights = bright_gray - float(bright_gray.min())
+        weights = weights + np.finfo(np.float32).eps
+        airlight = np.average(bright_rgb, axis=0, weights=weights)
+        return airlight.astype(np.float32)
+
+    def _estimate_sky_prior(
+        self,
+        rgb: np.ndarray,
+        sky_mask: np.ndarray | None,
+    ) -> np.ndarray | None:
+        if sky_mask is None:
+            return None
+
+        mask = np.asarray(sky_mask, dtype=bool)
+        if mask.shape != rgb.shape[:2]:
+            raise ValueError("sky_mask must have shape (H, W)")
+        if not np.any(mask):
+            return None
+
+        sky_pixels = rgb[mask]
+        sky_gray = sky_pixels @ _GRAY_WEIGHTS
+        threshold = float(np.quantile(sky_gray, _BRIGHT_SKY_QUANTILE))
+        bright_sky = sky_pixels[sky_gray >= threshold]
+        if bright_sky.size == 0:
+            bright_sky = sky_pixels
+        return np.mean(bright_sky, axis=0).astype(np.float32)
+
+    def _merge_with_sky_prior(
+        self,
+        airlight: np.ndarray,
+        sky_prior: np.ndarray,
+    ) -> np.ndarray:
+        sky_luminance = self._luminance(sky_prior)
+        if sky_luminance <= np.finfo(np.float32).eps:
+            return airlight.astype(np.float32)
+
+        target_luminance = max(self._luminance(airlight), sky_luminance)
+        return (sky_prior * (target_luminance / sky_luminance)).astype(np.float32)
+
+    @staticmethod
+    def _luminance(rgb: np.ndarray) -> float:
+        return float(np.dot(rgb, _GRAY_WEIGHTS))
 
     def _dark_channel(self, rgb: np.ndarray) -> np.ndarray:
         min_channel = np.min(rgb, axis=2)

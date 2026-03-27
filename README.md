@@ -88,7 +88,7 @@ Controls the fog simulation.
 
 | Field | Description |
 |---|---|
-| `airlight` | **Required.** Airlight estimation method: `"from_sky"` (mean sky colour), `"dcp"` (dark channel prior), or `"dcp_heuristic"` (DCP with median heuristic). |
+| `airlight` | **Required.** Airlight estimation method: `"from_sky"` (mean sky colour), `"dcp"` (dark channel prior), or `"dcp_heuristic"` (robust DCP with sky-guided colouring when sky pixels exist). |
 | `seed` | Random seed for reproducibility. `null` for non-deterministic. |
 | `depth_scale` | Multiplier applied to depth values after loading. |
 | `resize_depth` | Resize the depth map to match the RGB resolution (bilinear). |
@@ -131,7 +131,7 @@ The `airlight` config key selects how the atmospheric light *L_s* is estimated:
 |---|---|
 | `from_sky` | Mean RGB of sky pixels in the clean image. Falls back to white `[1, 1, 1]` when no sky pixels exist. |
 | `dcp` | Dark Channel Prior — selects the brightest pixel (by channel sum) among the top 0.1% darkest-channel pixels. |
-| `dcp_heuristic` | DCP with median heuristic — selects the pixel closest to the median intensity (BT.601 grayscale) among the top 0.1% darkest-channel pixels. |
+| `dcp_heuristic` | Robust DCP heuristic — pools the brighter half of the top 0.1% darkest-channel pixels, and when sky pixels exist it uses the brightest sky colours as the chromaticity prior while preserving DCP-derived luminance. |
 
 GPU-native implementations (`DCPAirlightTorch`, `DCPHeuristicAirlightTorch`) are used automatically when running on GPU.
 

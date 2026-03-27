@@ -429,8 +429,22 @@ class FogTransform(Transform):
                                             uniform_items[i]["sample_id"],
                                         )
                                     airlight[no_sky] = 1.0
+                            elif self.airlight_method == "dcp_heuristic":
+                                assert self.airlight_estimator_torch is not None
+                                al_list = []
+                                for idx in range(len(uniform_items)):
+                                    sky_mask_t = torch.from_numpy(
+                                        uniform_items[idx]["sky_mask"]
+                                    ).to(device=device, dtype=torch.bool)
+                                    al_t = self.airlight_estimator_torch.estimate_airlight(
+                                        rgb_batch[idx],
+                                        sky_mask_t,
+                                        sample_id=uniform_items[idx]["sample_id"],
+                                    )
+                                    al_list.append(al_t)
+                                airlight = torch.stack(al_list, dim=0)
                             else:
-                                # DCP / DCP heuristic: per-sample on GPU
+                                # Plain DCP: per-sample on GPU
                                 assert self.airlight_estimator_torch is not None
                                 al_list = []
                                 for idx in range(len(uniform_items)):
@@ -521,6 +535,18 @@ class FogTransform(Transform):
                             )
                             estimated_airlight = estimate_airlight_torch(
                                 rgb_t, sky_mask_t, sample_id=item["sample_id"]
+                            )
+                        elif self.airlight_method == "dcp_heuristic":
+                            assert self.airlight_estimator_torch is not None
+                            sky_mask_t = (
+                                torch.from_numpy(item["sky_mask"]).to(device).bool()
+                            )
+                            estimated_airlight = (
+                                self.airlight_estimator_torch.estimate_airlight(
+                                    rgb_t,
+                                    sky_mask_t,
+                                    sample_id=item["sample_id"],
+                                )
                             )
                         else:
                             assert self.airlight_estimator_torch is not None
