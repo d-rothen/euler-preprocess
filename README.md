@@ -131,9 +131,27 @@ The `airlight` config key selects how the atmospheric light *L_s* is estimated:
 |---|---|
 | `from_sky` | Mean RGB of sky pixels in the clean image. Falls back to white `[1, 1, 1]` when no sky pixels exist. |
 | `dcp` | Dark Channel Prior — selects the brightest pixel (by channel sum) among the top 0.1% darkest-channel pixels. |
-| `dcp_heuristic` | Robust DCP heuristic — pools the brighter half of the top 0.1% darkest-channel pixels, and when sky pixels exist it uses the brightest sky colours as the chromaticity prior while preserving DCP-derived luminance. |
+| `dcp_heuristic` | Robust DCP heuristic — pools the brighter half of the top 0.1% darkest-channel pixels, and when sky pixels exist it uses the brightest sky colours as the chromaticity prior while preserving DCP-derived luminance. Optional bias controls can nudge the result toward white or a cool fog tint. |
 
 GPU-native implementations (`DCPAirlightTorch`, `DCPHeuristicAirlightTorch`) are used automatically when running on GPU.
+
+When `airlight` is `"dcp_heuristic"`, you can optionally add:
+
+```json
+"dcp_heuristic": {
+  "patch_size": 15,
+  "top_percent": 0.001,
+  "white_bias": 0.1,
+  "cool_bias": 0.15,
+  "cool_target": [0.93, 0.97, 1.0]
+}
+```
+
+- `white_bias` mixes the final airlight toward neutral white.
+- `cool_bias` mixes the final airlight toward a sky-relative cool target.
+- `cool_target` is the cool-white anchor used to derive that sky-relative target. When sky pixels exist, the effective cool target is a blend of the estimated sky colour and `cool_target`; without sky pixels, it falls back to the airlight estimate and `cool_target`.
+- `white_bias + cool_bias` must be `<= 1`.
+- The tint bias preserves the estimated airlight luminance, so it shifts colour without silently changing fog density.
 
 ### Model Selection
 

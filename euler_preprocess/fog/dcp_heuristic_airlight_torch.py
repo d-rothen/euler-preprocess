@@ -8,6 +8,8 @@ import torch.nn.functional as F
 # NTSC / BT.601 luminance weights
 _GRAY_WEIGHTS = torch.tensor([0.2989, 0.5870, 0.1140])
 _BRIGHT_SKY_QUANTILE = 0.75
+_WHITE_TARGET = torch.ones(3)
+_DEFAULT_COOL_TARGET = torch.tensor([0.93, 0.97, 1.0])
 
 
 class DCPHeuristicAirlightTorch:
@@ -23,21 +25,42 @@ class DCPHeuristicAirlightTorch:
     device.  Returns a ``(3,)`` tensor on the same device.
     """
 
-    def __init__(self, patch_size: int = 15, top_percent: float = 0.001) -> None:
+    def __init__(
+        self,
+        patch_size: int = 15,
+        top_percent: float = 0.001,
+        white_bias: float = 0.0,
+        cool_bias: float = 0.0,
+        cool_target: torch.Tensor | None = None,
+    ) -> None:
         patch_size = int(patch_size)
         if patch_size < 1 or patch_size % 2 == 0:
             raise ValueError("patch_size must be a positive odd integer")
         top_percent = float(top_percent)
         if not 0.0 < top_percent <= 1.0:
             raise ValueError("top_percent must be in (0, 1]")
+        white_bias = float(white_bias)
+        cool_bias = float(cool_bias)
+        if not 0.0 <= white_bias <= 1.0:
+            raise ValueError("white_bias must be in [0, 1]")
+        if not 0.0 <= cool_bias <= 1.0:
+            raise ValueError("cool_bias must be in [0, 1]")
+        if white_bias + cool_bias > 1.0:
+            raise ValueError("white_bias + cool_bias must be <= 1")
         self.patch_size = patch_size
         self.top_percent = top_percent
+        self.white_bias = white_bias
+        self.cool_bias = cool_bias
+        self.cool_target = self._prepare_color(
+            _DEFAULT_COOL_TARGET if cool_target is None else cool_target
+        )
 
     def compute(self, rgb: torch.Tensor) -> torch.Tensor:
         """Compute airlight from an ``(H, W, 3)`` float tensor."""
         image = self._prepare_rgb(rgb)
         candidate_rgb, candidate_gray = self._candidate_pixels(image)
-        return self._estimate_from_candidates(candidate_rgb, candidate_gray)
+        airlight = self._estimate_from_candidates(candidate_rgb, candidate_gray)
+        return self._apply_color_bias(airlight, reference_color=airlight)
 
     def __call__(self, rgb: torch.Tensor) -> torch.Tensor:
         return self.compute(rgb)
@@ -54,8 +77,9 @@ class DCPHeuristicAirlightTorch:
         airlight = self._estimate_from_candidates(candidate_rgb, candidate_gray)
         sky_prior = self._estimate_sky_prior(prepared, sky_mask)
         if sky_prior is None:
-            return airlight
-        return self._merge_with_sky_prior(airlight, sky_prior)
+            return self._apply_color_bias(airlight, reference_color=airlight)
+        merged = self._merge_with_sky_prior(airlight, sky_prior)
+        return self._apply_color_bias(merged, reference_color=sky_prior)
 
     # ------------------------------------------------------------------
 
@@ -76,6 +100,16 @@ class DCPHeuristicAirlightTorch:
             raise ValueError("rgb image must have shape (H, W, 3)")
         image = torch.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
         return image.to(torch.float32)
+
+    @staticmethod
+    def _prepare_color(value: torch.Tensor) -> torch.Tensor:
+        color = torch.as_tensor(value, dtype=torch.float32)
+        if color.ndim != 1 or color.shape[0] != 3:
+            raise ValueError("cool_target must be a length-3 color")
+        color = torch.nan_to_num(color, nan=0.0, posinf=0.0, neginf=0.0)
+        if float(color.max().item()) > 1.0:
+            color = color / 255.0
+        return torch.clamp(color, 0.0, 1.0)
 
     def _candidate_pixels(
         self,
@@ -148,6 +182,43 @@ class DCPHeuristicAirlightTorch:
 
         target_luminance = max(self._luminance(airlight), sky_luminance)
         return sky_prior * (target_luminance / sky_luminance)
+
+    def _apply_color_bias(
+        self,
+        airlight: torch.Tensor,
+        reference_color: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.white_bias == 0.0 and self.cool_bias == 0.0:
+            return airlight
+
+        reference = airlight if reference_color is None else reference_color
+        base_weight = 1.0 - self.white_bias - self.cool_bias
+        white_target = _WHITE_TARGET.to(device=airlight.device, dtype=airlight.dtype)
+        cool_target = self._correlated_cool_target(reference).to(
+            device=airlight.device,
+            dtype=airlight.dtype,
+        )
+        biased = (
+            base_weight * airlight
+            + self.white_bias * white_target
+            + self.cool_bias * cool_target
+        )
+        airlight_luminance = self._luminance(airlight)
+        biased_luminance = self._luminance(biased)
+        if (
+            airlight_luminance > torch.finfo(airlight.dtype).eps
+            and biased_luminance > torch.finfo(airlight.dtype).eps
+        ):
+            biased = biased * (airlight_luminance / biased_luminance)
+        return biased
+
+    def _correlated_cool_target(self, reference_color: torch.Tensor) -> torch.Tensor:
+        reference = self._prepare_color(reference_color)
+        cool_target = self.cool_target.to(
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        return 0.5 * reference + 0.5 * cool_target
 
     @staticmethod
     def _quantile_value(values: torch.Tensor, quantile: float) -> torch.Tensor:
