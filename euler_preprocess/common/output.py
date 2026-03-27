@@ -24,7 +24,7 @@ class PipelineOutputTargetConfig:
     """Runtime-resolved pipeline output target for a single transform output."""
 
     slot: str
-    model_modality_id: int
+    model_modality_id: int | None
     dataset_type: str
     relative_path: str
     path: str
@@ -33,7 +33,7 @@ class PipelineOutputTargetConfig:
     def __post_init__(self) -> None:
         if not self.slot:
             raise ValueError("pipeline.output_targets[].slot is required")
-        if self.model_modality_id <= 0:
+        if self.model_modality_id is not None and self.model_modality_id <= 0:
             raise ValueError(
                 "pipeline.output_targets[].modelModalityId must be positive"
             )
@@ -60,9 +60,14 @@ class PipelineOutputTargetConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineOutputTargetConfig":
+        raw_model_modality_id = data.get("modelModalityId")
         return cls(
             slot=data.get("slot", ""),
-            model_modality_id=int(data.get("modelModalityId", 0)),
+            model_modality_id=(
+                None
+                if raw_model_modality_id in (None, "")
+                else int(raw_model_modality_id)
+            ),
             dataset_type=data.get("datasetType", ""),
             relative_path=data.get("relativePath", ""),
             path=data.get("path", ""),
@@ -70,13 +75,15 @@ class PipelineOutputTargetConfig:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "slot": self.slot,
-            "modelModalityId": self.model_modality_id,
             "datasetType": self.dataset_type,
             "relativePath": self.relative_path,
             "storage": self.storage,
         }
+        if self.model_modality_id is not None:
+            result["modelModalityId"] = self.model_modality_id
+        return result
 
 
 @dataclass

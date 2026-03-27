@@ -49,7 +49,6 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
     "output_targets": [
       {
         "slot": "rgb",
-        "modelModalityId": 71,
         "datasetType": "rgb",
         "relativePath": "foggy_rgb",
         "path": "/pipeline/output/foggy_rgb",
@@ -93,7 +92,6 @@ When a modality directory contains [ds-crawler](https://github.com/d-rothen/ds-c
     "output_targets": [
       {
         "slot": "depth",
-        "modelModalityId": 72,
         "datasetType": "depth",
         "relativePath": "radial_depth.zip",
         "path": "/pipeline/output/radial_depth.zip",
@@ -108,6 +106,7 @@ Notes:
 
 - `output_root` is only a fallback when `output_path` is omitted.
 - A matching `output_targets[].slot` overrides the write root for that run.
+- `output_targets[].modelModalityId` is optional. When provided it is copied into the pipeline manifest; when omitted it is left out there as well.
 - `storage: "directory"` writes a dataset directory and `storage: "zip"` writes a zip dataset.
 - `storage: "file"` is parsed but rejected at runtime.
 - When `outputs_manifest_path` is set and a pipeline target is matched, finalization writes `.euler_pipeline/pipeline_outputs.json` with the same manifest shape used by `euler-inference`.

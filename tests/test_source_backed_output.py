@@ -228,6 +228,48 @@ def test_pipeline_target_controls_root_and_manifest(tmp_path: Path) -> None:
     }
 
 
+def test_pipeline_target_allows_missing_model_modality_id(tmp_path: Path) -> None:
+    dataset = _make_dataset(tmp_path)
+    pipeline_root = tmp_path / "pipeline_root_optional_id"
+    manifest_path = pipeline_root / ".euler_pipeline" / "pipeline_outputs.json"
+    config = {
+        "pipeline": {
+            "output_root": str(pipeline_root),
+            "outputs_manifest_path": str(manifest_path),
+            "output_targets": [
+                {
+                    "slot": "rgb",
+                    "datasetType": "rgb",
+                    "relativePath": "foggy_rgb",
+                    "path": str(pipeline_root / "foggy_rgb"),
+                    "storage": "directory",
+                }
+            ],
+        }
+    }
+    output_backend = prepare_output_backend(config, dataset, FogTransform)
+    transform = FogTransform(
+        config_path=str(_make_fog_config(tmp_path / "fog_pipeline_optional_id.json")),
+        out_path=str(output_backend.root),
+        output_backend=output_backend,
+    )
+
+    transform.run(dataset)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest == {
+        "version": 1,
+        "outputs": [
+            {
+                "slot": "rgb",
+                "datasetType": "rgb",
+                "relativePath": "foggy_rgb",
+                "storage": "directory",
+            }
+        ],
+    }
+
+
 def test_radial_source_backed_output_sets_radial_depth_metadata(
     tmp_path: Path,
 ) -> None:
