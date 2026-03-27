@@ -7,6 +7,7 @@ import pytest
 
 from euler_preprocess.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
 from euler_preprocess.fog.foggify import Foggify
+from euler_preprocess.fog.models import apply_model
 
 try:
     import torch
@@ -135,6 +136,28 @@ class TestDCPHeuristicAirlight:
             atol=1e-6,
         )
 
+    def test_apply_model_accepts_dcp_heuristic_atmospheric_light_alias(self):
+        rng = np.random.default_rng(0)
+        rgb = np.full((2, 2, 3), 0.4, dtype=np.float32)
+        depth = np.ones((2, 2), dtype=np.float32)
+        estimated_airlight = np.array([0.4, 0.5, 0.6], dtype=np.float32)
+        model_cfg = {
+            "visibility_m": {"dist": "constant", "value": 120.0},
+            "atmospheric_light": "dcp_heuristic",
+        }
+
+        _, _, airlight = apply_model(
+            rgb,
+            depth,
+            "uniform",
+            model_cfg,
+            rng,
+            0.05,
+            estimated_airlight,
+        )
+
+        np.testing.assert_allclose(airlight, estimated_airlight, atol=1e-6)
+
 
 @pytest.mark.skipif(torch is None, reason="torch not installed")
 class TestDCPHeuristicAirlightTorch:
@@ -188,6 +211,47 @@ class TestDCPHeuristicAirlightTorch:
         torch.testing.assert_close(
             derived,
             torch.tensor([0.85, 0.83, 0.8], dtype=torch.float32),
+            atol=1e-6,
+            rtol=0,
+        )
+
+    def test_apply_model_torch_accepts_dcp_heuristic_atmospheric_light_alias(
+        self,
+        tmp_path,
+    ):
+        cfg = {
+            "airlight": "dcp_heuristic",
+            "device": "cpu",
+            "seed": 7,
+            "models": {
+                "uniform": {
+                    "visibility_m": {"dist": "constant", "value": 120.0},
+                    "atmospheric_light": "dcp_heuristic",
+                },
+            },
+            "selection": {"mode": "fixed", "model": "uniform"},
+        }
+        cfg_path = tmp_path / "fog_config.json"
+        cfg_path.write_text(json.dumps(cfg))
+        foggify = Foggify(config_path=str(cfg_path), out_path=str(tmp_path / "out"))
+
+        rgb_t = torch.full((2, 2, 3), 0.4, dtype=torch.float32)
+        depth_t = torch.ones((2, 2), dtype=torch.float32)
+        estimated_airlight = torch.tensor([0.4, 0.5, 0.6], dtype=torch.float32)
+
+        _, _, airlight = foggify._apply_model_torch(
+            rgb_t,
+            depth_t,
+            "uniform",
+            cfg["models"]["uniform"],
+            np.random.default_rng(0),
+            estimated_airlight,
+            torch.Generator(),
+        )
+
+        torch.testing.assert_close(
+            airlight,
+            estimated_airlight,
             atol=1e-6,
             rtol=0,
         )

@@ -37,6 +37,7 @@ from euler_preprocess.fog.models import (
     resolve_model_config,
     resolve_scales,
     select_model,
+    uses_estimated_airlight,
     visibility_to_k,
 )
 
@@ -263,7 +264,7 @@ class FogTransform(Transform):
         k_mean = visibility_to_k(visibility, contrast_threshold)
 
         al_spec = model_cfg.get("atmospheric_light", "from_sky")
-        if al_spec == "from_sky" or al_spec is None:
+        if uses_estimated_airlight(al_spec):
             ls_base = normalize_atmospheric_light_torch(estimated_airlight_t).squeeze(0)
         else:
             sampled_al = sample_value(al_spec, rng)
@@ -418,7 +419,7 @@ class FogTransform(Transform):
                         al_spec = uniform_items[0]["model_cfg"].get(
                             "atmospheric_light", "from_sky"
                         )
-                        if al_spec == "from_sky" or al_spec is None:
+                        if uses_estimated_airlight(al_spec):
                             if self.airlight_method == "from_sky":
                                 sky_mask_batch = torch.stack(
                                     [
