@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 
 from euler_preprocess.common.device import configure_device, iter_batches, torch_generator_for_index
 from euler_preprocess.common.intrinsics import extract_intrinsics, planar_to_radial_depth, planar_to_radial_depth_torch
-from euler_preprocess.common.io import OutputWriter, load_json
+from euler_preprocess.common.io import load_json
 from euler_preprocess.common.logging import get_logger, progress_bar
 from euler_preprocess.common.noise import perlin_fbm_torch
 from euler_preprocess.common.normalize import (
@@ -19,6 +19,7 @@ from euler_preprocess.common.normalize import (
     normalize_rgb_torch,
     normalize_sky_mask,
 )
+from euler_preprocess.common.output import LegacyOutputBackend
 from euler_preprocess.common.sampling import format_value, sample_value
 from euler_preprocess.common.transform import Transform
 from euler_preprocess.fog.airlight_from_sky import AirlightFromSky
@@ -70,16 +71,19 @@ class FogTransform(Transform):
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth", "semantic_segmentation"}
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
+    SOURCE_MODALITY: ClassVar[str] = "rgb"
+    OUTPUT_SLOT: ClassVar[str] = "rgb"
 
     def __init__(
         self,
         config_path: str,
         out_path: str,
         suffix: str = "",
+        output_backend: Any | None = None,
     ) -> None:
         self.config_path = Path(config_path)
-        self.writer = OutputWriter(out_path)
-        self.out_path = self.writer.root
+        self.output_backend = output_backend or LegacyOutputBackend(out_path)
+        self.out_path = self.output_backend.root
         self.suffix = suffix or ""
 
         self.config = load_json(self.config_path)
@@ -187,7 +191,11 @@ class FogTransform(Transform):
         self.torch_device, self.use_gpu = configure_device(self.device)
 
     def _generate_fog_cpu(self, samples: Iterable[dict]) -> list[Path]:
-        total = len(samples)  # type: ignore[arg-type]
+        try:
+            total = len(samples)  # type: ignore[arg-type]
+        except TypeError:
+            samples = list(samples)
+            total = len(samples)
         saved_paths: list[Path] = []
 
         with progress_bar(total, "CPU", self.logger) as bar:
@@ -228,18 +236,25 @@ class FogTransform(Transform):
                     estimated_airlight,
                 )
 
-                output_path = self._build_output_path(
-                    sample["id"], model_name, beta, airlight,
-                    full_id=sample.get("full_id"),
-                )
-                self.writer.mkdir(output_path.parent)
-                self.writer.save_image(output_path, foggy)
-                saved_paths.append(output_path)
-                self._write_model_config(model_name, model_cfg, saved_paths)
+                if self.output_backend.is_source_backed:
+                    saved_paths.append(self.output_backend.write(sample, foggy))
+                else:
+                    output_path = self._build_output_path(
+                        sample["id"], model_name, beta, airlight,
+                        full_id=sample.get("full_id"),
+                    )
+                    saved_paths.append(
+                        self.output_backend.write(
+                            sample,
+                            foggy,
+                            default_path=output_path,
+                        )
+                    )
+                    self._write_model_config(model_name, model_cfg, saved_paths)
 
                 if bar is not None:
                     bar.update(1)
-        self.writer.close()
+        self.output_backend.finalize()
         return saved_paths
 
     def _apply_model_torch(
@@ -327,7 +342,11 @@ class FogTransform(Transform):
         if torch is None or self.torch_device is None:
             raise RuntimeError("Torch device not configured for GPU execution.")
         device = self.torch_device
-        total = len(samples)  # type: ignore[arg-type]
+        try:
+            total = len(samples)  # type: ignore[arg-type]
+        except TypeError:
+            samples = list(samples)
+            total = len(samples)
         saved_paths: list[Path] = []
 
         with progress_bar(total, "GPU", self.logger) as bar:
@@ -353,6 +372,7 @@ class FogTransform(Transform):
                         {
                             "sample_id": sample["id"],
                             "full_id": sample.get("full_id"),
+                            "meta": sample.get("meta"),
                             "rgb": rgb,
                             "depth": depth,
                             "intrinsics": intrinsics,
@@ -520,19 +540,33 @@ class FogTransform(Transform):
                                 torch.clamp(foggy[idx], 0.0, 1.0).cpu().numpy()
                             )
                             airlight_np = ls_base[idx].detach().cpu().numpy()
-                            output_path = self._build_output_path(
-                                item["sample_id"],
-                                item["model_name"],
-                                k_means[idx],
-                                airlight_np,
-                                full_id=item.get("full_id"),
-                            )
-                            self.writer.mkdir(output_path.parent)
-                            self.writer.save_image(output_path, foggy_img)
-                            saved_paths.append(output_path)
-                            self._write_model_config(
-                                item["model_name"], item["model_cfg"], saved_paths
-                            )
+                            sample_ref = {
+                                "id": item["sample_id"],
+                                "full_id": item.get("full_id"),
+                                "meta": item.get("meta"),
+                            }
+                            if self.output_backend.is_source_backed:
+                                saved_paths.append(
+                                    self.output_backend.write(sample_ref, foggy_img)
+                                )
+                            else:
+                                output_path = self._build_output_path(
+                                    item["sample_id"],
+                                    item["model_name"],
+                                    k_means[idx],
+                                    airlight_np,
+                                    full_id=item.get("full_id"),
+                                )
+                                saved_paths.append(
+                                    self.output_backend.write(
+                                        sample_ref,
+                                        foggy_img,
+                                        default_path=output_path,
+                                    )
+                                )
+                                self._write_model_config(
+                                    item["model_name"], item["model_cfg"], saved_paths
+                                )
 
                     for item in other_items:
                         rgb_t = normalize_rgb_torch(item["rgb"], device)
@@ -582,24 +616,38 @@ class FogTransform(Transform):
                         )
                         foggy_img = torch.clamp(foggy_t, 0.0, 1.0).cpu().numpy()
                         airlight_np = airlight_t.detach().cpu().numpy()
-                        output_path = self._build_output_path(
-                            item["sample_id"],
-                            item["model_name"],
-                            beta,
-                            airlight_np,
-                            full_id=item.get("full_id"),
-                        )
-                        self.writer.mkdir(output_path.parent)
-                        self.writer.save_image(output_path, foggy_img)
-                        saved_paths.append(output_path)
-                        self._write_model_config(
-                            item["model_name"], item["model_cfg"], saved_paths
-                        )
+                        sample_ref = {
+                            "id": item["sample_id"],
+                            "full_id": item.get("full_id"),
+                            "meta": item.get("meta"),
+                        }
+                        if self.output_backend.is_source_backed:
+                            saved_paths.append(
+                                self.output_backend.write(sample_ref, foggy_img)
+                            )
+                        else:
+                            output_path = self._build_output_path(
+                                item["sample_id"],
+                                item["model_name"],
+                                beta,
+                                airlight_np,
+                                full_id=item.get("full_id"),
+                            )
+                            saved_paths.append(
+                                self.output_backend.write(
+                                    sample_ref,
+                                    foggy_img,
+                                    default_path=output_path,
+                                )
+                            )
+                            self._write_model_config(
+                                item["model_name"], item["model_cfg"], saved_paths
+                            )
 
                 if bar is not None:
                     bar.update(len(batch))
 
-        self.writer.close()
+        self.output_backend.finalize()
         return saved_paths
 
     def _build_output_path(
@@ -630,14 +678,15 @@ class FogTransform(Transform):
     def _write_model_config(
         self, model_name: str, model_cfg: dict, saved_paths: list
     ) -> None:
+        if self.output_backend.is_source_backed:
+            return
         if model_name in self._written_configs:
             return
         target_dir = self.out_path / model_name
-        self.writer.mkdir(target_dir)
         config_path = target_dir / "config.json"
 
         enriched_config = {**model_cfg, "size": len(saved_paths)}
-        self.writer.write_json(config_path, enriched_config)
+        self.output_backend.write_json(config_path, enriched_config)
         self._written_configs.add(model_name)
 
 

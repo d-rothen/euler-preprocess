@@ -15,6 +15,9 @@ class Transform(ABC):
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = set()
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
+    SOURCE_MODALITY: ClassVar[str | None] = None
+    OUTPUT_SLOT: ClassVar[str | None] = None
+    OUTPUT_INDEX_META_OVERRIDES: ClassVar[dict[str, object]] = {}
 
     @abstractmethod
     def __init__(self, config_path: str, out_path: str) -> None: ...

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.logging import get_logger, log_dataset_info
+from euler_preprocess.common.output import prepare_output_backend
 
 
 # ---------------------------------------------------------------------------
@@ -41,8 +42,6 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
     if transform_config_key not in config:
         transform_config_key = "fog_config_path"
     transform_config_path = _resolve(config[transform_config_key], config_dir)
-    output_path = config["output_path"]
-
     # Read the transform config to determine the device (for dataset logging)
     with open(transform_config_path, "r", encoding="utf-8") as f:
         transform_cfg = json.load(f)
@@ -51,11 +50,11 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
 
     logger.info("Config: %s", args.config)
     logger.info("Transform config: %s", transform_config_path)
-    logger.info("Output path: %s", output_path)
 
     required_modalities = transform_class.REQUIRED_MODALITIES
     required_hierarchical = transform_class.REQUIRED_HIERARCHICAL_MODALITIES or None
     dataset = build_dataset(config, required_modalities, required_hierarchical)
+    output_backend = prepare_output_backend(config, dataset, transform_class)
     dataset_name = config.get("dataset", "dataset")
 
     raw_modalities = {
@@ -69,10 +68,12 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         else:
             modality_info[name] = entry
     log_dataset_info(logger, dataset_name, len(dataset), modality_info, use_gpu)
+    logger.info("Output path: %s", output_backend.root)
 
     transform = transform_class(
         config_path=str(transform_config_path),
-        out_path=output_path,
+        out_path=str(output_backend.root),
+        output_backend=output_backend,
     )
 
     saved_paths = transform.run(dataset)
