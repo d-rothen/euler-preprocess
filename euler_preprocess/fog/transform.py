@@ -132,6 +132,20 @@ class FogTransform(Transform):
                 f"Supported values: {AIRLIGHT_METHODS}"
             )
         self.airlight_method = airlight_method
+        dcp_heuristic_cfg = self.config.get("dcp_heuristic", {})
+        if not isinstance(dcp_heuristic_cfg, dict):
+            raise ValueError("Config key 'dcp_heuristic' must be an object")
+        dcp_heuristic_kwargs = {
+            key: dcp_heuristic_cfg[key]
+            for key in (
+                "patch_size",
+                "top_percent",
+                "white_bias",
+                "cool_bias",
+                "cool_target",
+            )
+            if key in dcp_heuristic_cfg
+        }
         self.airlight_estimator_torch = None
         if airlight_method == "from_sky":
             self.airlight_estimator = AirlightFromSky(sky_depth_threshold=0.0)
@@ -141,12 +155,14 @@ class FogTransform(Transform):
                 from euler_preprocess.fog.dcp_airlight_torch import DCPAirlightTorch
                 self.airlight_estimator_torch = DCPAirlightTorch()
         elif airlight_method == "dcp_heuristic":
-            self.airlight_estimator = DCPHeuristicAirlight()
+            self.airlight_estimator = DCPHeuristicAirlight(**dcp_heuristic_kwargs)
             if torch is not None:
                 from euler_preprocess.fog.dcp_heuristic_airlight_torch import (
                     DCPHeuristicAirlightTorch,
                 )
-                self.airlight_estimator_torch = DCPHeuristicAirlightTorch()
+                self.airlight_estimator_torch = DCPHeuristicAirlightTorch(
+                    **dcp_heuristic_kwargs
+                )
 
     def run(self, samples: Iterable[dict]) -> list[Path]:
         """Run the fog transform. Alias for :meth:`generate_fog`."""

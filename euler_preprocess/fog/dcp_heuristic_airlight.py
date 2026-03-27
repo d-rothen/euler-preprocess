@@ -7,6 +7,8 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 _GRAY_WEIGHTS = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
 _BRIGHT_SKY_QUANTILE = 0.75
+_WHITE_TARGET = np.ones(3, dtype=np.float32)
+_DEFAULT_COOL_TARGET = np.array([0.93, 0.97, 1.0], dtype=np.float32)
 
 
 class DCPHeuristicAirlight:
@@ -19,15 +21,35 @@ class DCPHeuristicAirlight:
     chromaticity prior and the DCP estimate contributes the target luminance.
     """
 
-    def __init__(self, patch_size: int = 15, top_percent: float = 0.001) -> None:
+    def __init__(
+        self,
+        patch_size: int = 15,
+        top_percent: float = 0.001,
+        white_bias: float = 0.0,
+        cool_bias: float = 0.0,
+        cool_target: np.ndarray | None = None,
+    ) -> None:
         patch_size = int(patch_size)
         if patch_size < 1 or patch_size % 2 == 0:
             raise ValueError("patch_size must be a positive odd integer")
         top_percent = float(top_percent)
         if not 0.0 < top_percent <= 1.0:
             raise ValueError("top_percent must be in (0, 1]")
+        white_bias = float(white_bias)
+        cool_bias = float(cool_bias)
+        if not 0.0 <= white_bias <= 1.0:
+            raise ValueError("white_bias must be in [0, 1]")
+        if not 0.0 <= cool_bias <= 1.0:
+            raise ValueError("cool_bias must be in [0, 1]")
+        if white_bias + cool_bias > 1.0:
+            raise ValueError("white_bias + cool_bias must be <= 1")
         self.patch_size = patch_size
         self.top_percent = top_percent
+        self.white_bias = white_bias
+        self.cool_bias = cool_bias
+        self.cool_target = self._prepare_color(
+            _DEFAULT_COOL_TARGET if cool_target is None else cool_target
+        )
 
     # -- public interface (matches AirlightFromSky / DCPAirlight) -----------
 
@@ -37,7 +59,8 @@ class DCPHeuristicAirlight:
     def compute(self, rgb: np.ndarray) -> np.ndarray:
         image = self._prepare_rgb(rgb)
         candidate_rgb, candidate_gray = self._candidate_pixels(image)
-        return self._estimate_from_candidates(candidate_rgb, candidate_gray)
+        airlight = self._estimate_from_candidates(candidate_rgb, candidate_gray)
+        return self._apply_color_bias(airlight, reference_color=airlight)
 
     def estimate_airlight(
         self,
@@ -51,8 +74,9 @@ class DCPHeuristicAirlight:
         airlight = self._estimate_from_candidates(candidate_rgb, candidate_gray)
         sky_prior = self._estimate_sky_prior(prepared, sky_mask)
         if sky_prior is None:
-            return airlight
-        return self._merge_with_sky_prior(airlight, sky_prior)
+            return self._apply_color_bias(airlight, reference_color=airlight)
+        merged = self._merge_with_sky_prior(airlight, sky_prior)
+        return self._apply_color_bias(merged, reference_color=sky_prior)
 
     # -- internals ----------------------------------------------------------
 
@@ -75,6 +99,16 @@ class DCPHeuristicAirlight:
         image = image.astype(np.float32)
         image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
         return image
+
+    @staticmethod
+    def _prepare_color(value: np.ndarray) -> np.ndarray:
+        color = np.asarray(value, dtype=np.float32)
+        if color.ndim != 1 or color.shape[0] != 3:
+            raise ValueError("cool_target must be a length-3 color")
+        color = np.nan_to_num(color, nan=0.0, posinf=0.0, neginf=0.0)
+        if float(color.max()) > 1.0:
+            color = color / 255.0
+        return np.clip(color, 0.0, 1.0)
 
     def _candidate_pixels(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         dark_channel = self._dark_channel(rgb)
@@ -146,6 +180,35 @@ class DCPHeuristicAirlight:
 
         target_luminance = max(self._luminance(airlight), sky_luminance)
         return (sky_prior * (target_luminance / sky_luminance)).astype(np.float32)
+
+    def _apply_color_bias(
+        self,
+        airlight: np.ndarray,
+        reference_color: np.ndarray | None,
+    ) -> np.ndarray:
+        if self.white_bias == 0.0 and self.cool_bias == 0.0:
+            return airlight.astype(np.float32)
+
+        reference = airlight if reference_color is None else reference_color
+        cool_target = self._correlated_cool_target(reference)
+        base_weight = 1.0 - self.white_bias - self.cool_bias
+        biased = (
+            base_weight * airlight
+            + self.white_bias * _WHITE_TARGET
+            + self.cool_bias * cool_target
+        )
+        airlight_luminance = self._luminance(airlight)
+        biased_luminance = self._luminance(biased)
+        if (
+            airlight_luminance > np.finfo(np.float32).eps
+            and biased_luminance > np.finfo(np.float32).eps
+        ):
+            biased = biased * (airlight_luminance / biased_luminance)
+        return biased.astype(np.float32)
+
+    def _correlated_cool_target(self, reference_color: np.ndarray) -> np.ndarray:
+        reference = self._prepare_color(reference_color)
+        return 0.5 * reference + 0.5 * self.cool_target
 
     @staticmethod
     def _luminance(rgb: np.ndarray) -> float:
