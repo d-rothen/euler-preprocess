@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import zipfile
 
 import numpy as np
 
@@ -268,6 +269,30 @@ def test_pipeline_target_allows_missing_model_modality_id(tmp_path: Path) -> Non
             }
         ],
     }
+
+
+def test_fog_source_backed_output_can_write_zip(tmp_path: Path) -> None:
+    dataset = _make_dataset(tmp_path)
+    config = {"output_path": str(tmp_path / "foggy_rgb.zip")}
+    output_backend = prepare_output_backend(config, dataset, FogTransform)
+    transform = FogTransform(
+        config_path=str(_make_fog_config(tmp_path / "fog_zip_config.json")),
+        out_path=str(output_backend.root),
+        output_backend=output_backend,
+    )
+
+    saved_paths = transform.run(dataset)
+
+    assert saved_paths == [Path(f"{tmp_path / 'foggy_rgb.zip'}::Scene01/Camera_0/00001.png")]
+
+    with zipfile.ZipFile(tmp_path / "foggy_rgb.zip", "r") as zf:
+        names = set(zf.namelist())
+        assert "Scene01/Camera_0/00001.png" in names
+        assert ".ds_crawler/output.json" in names
+        output_index = json.loads(zf.read(".ds_crawler/output.json"))
+
+    assert output_index["euler_train"]["modality_type"] == "rgb"
+    assert output_index["euler_loading"]["function"] == "rgb"
 
 
 def test_radial_source_backed_output_sets_radial_depth_metadata(
