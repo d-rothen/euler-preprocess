@@ -126,3 +126,59 @@ class TestSkyDepthTransform:
         assert result.shape == (4, 4)
         assert result[0, 0] == 500.0
         assert result[1, 0] == 5.0
+
+    def test_strict_aborts_on_bad_sanity_samples(self, tmp_path):
+        """--strict raises when sanity-check samples look suspicious."""
+        cfg = {"sky_depth_value": 500.0, "sanity_check_samples": 2}
+        cfg_path = tmp_path / "strict.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        depth = np.ones((4, 4), dtype=np.float32)
+        empty_mask = np.zeros((4, 4), dtype=bool)  # 0 sky pixels — bad
+        samples = [
+            {"id": "no_sky_1", "depth": depth.copy(), "semantic_segmentation": empty_mask.copy()},
+            {"id": "no_sky_2", "depth": depth.copy(), "semantic_segmentation": empty_mask.copy()},
+            {"id": "no_sky_3", "depth": depth.copy(), "semantic_segmentation": empty_mask.copy()},
+        ]
+
+        out_path = tmp_path / "output"
+        transform = SkyDepthTransform(str(cfg_path), str(out_path), strict=True)
+        with pytest.raises(RuntimeError, match="sanity-check samples failed"):
+            transform.run(samples)
+
+    def test_strict_passes_when_samples_look_good(self, tmp_path):
+        """--strict does not raise when sanity samples have plausible sky pixels."""
+        cfg = {"sky_depth_value": 500.0, "sanity_check_samples": 2}
+        cfg_path = tmp_path / "strict_ok.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        depth = np.ones((10, 10), dtype=np.float32)
+        sky_mask = np.zeros((10, 10), dtype=bool)
+        sky_mask[:3, :] = True  # 30% sky — fine
+        samples = [
+            {"id": f"f_{i}", "depth": depth.copy(), "semantic_segmentation": sky_mask.copy()}
+            for i in range(3)
+        ]
+
+        out_path = tmp_path / "output"
+        transform = SkyDepthTransform(str(cfg_path), str(out_path), strict=True)
+        paths = transform.run(samples)
+        assert len(paths) == 3
+
+    def test_non_strict_warns_but_continues(self, tmp_path):
+        """Without --strict, bad sanity samples only warn — processing continues."""
+        cfg = {"sky_depth_value": 500.0, "sanity_check_samples": 1}
+        cfg_path = tmp_path / "lenient.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        depth = np.ones((4, 4), dtype=np.float32)
+        empty_mask = np.zeros((4, 4), dtype=bool)
+        samples = [
+            {"id": f"f_{i}", "depth": depth.copy(), "semantic_segmentation": empty_mask.copy()}
+            for i in range(2)
+        ]
+
+        out_path = tmp_path / "output"
+        transform = SkyDepthTransform(str(cfg_path), str(out_path), strict=False)
+        paths = transform.run(samples)
+        assert len(paths) == 2

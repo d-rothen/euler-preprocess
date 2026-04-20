@@ -6,6 +6,7 @@ script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
@@ -70,11 +71,20 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
     log_dataset_info(logger, dataset_name, len(dataset), modality_info, use_gpu)
     logger.info("Output path: %s", output_backend.root)
 
-    transform = transform_class(
-        config_path=str(transform_config_path),
-        out_path=str(output_backend.root),
-        output_backend=output_backend,
-    )
+    transform_kwargs: dict = {
+        "config_path": str(transform_config_path),
+        "out_path": str(output_backend.root),
+        "output_backend": output_backend,
+    }
+    init_params = inspect.signature(transform_class.__init__).parameters
+    if "strict" in init_params:
+        transform_kwargs["strict"] = bool(getattr(args, "strict", False))
+    elif getattr(args, "strict", False):
+        logger.warning(
+            "--strict was set but %s does not support strict mode; ignoring.",
+            transform_class.__name__,
+        )
+    transform = transform_class(**transform_kwargs)
 
     saved_paths = transform.run(dataset)
 
@@ -111,33 +121,34 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # --- fog ---
-    fog_parser = subparsers.add_parser(
-        "fog", help="Apply synthetic fog to RGB images.",
-    )
-    fog_parser.add_argument(
+    # Shared flags available to every subcommand.  Currently only honoured by
+    # subcommands whose transforms accept a ``strict`` argument (see
+    # ``_run_transform``); others log a warning and ignore it.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--config", "-c", type=str, required=True,
         help="Path to the dataset configuration JSON file.",
+    )
+    common.add_argument(
+        "--strict", action="store_true",
+        help="Abort early if leading-sample sanity checks detect suspicious "
+             "inputs (e.g. 0%% or ~100%% sky pixels, wrong mask shape). "
+             "Currently honoured by: sky-depth.",
+    )
+
+    fog_parser = subparsers.add_parser(
+        "fog", parents=[common], help="Apply synthetic fog to RGB images.",
     )
     fog_parser.set_defaults(func=_cmd_fog)
 
-    # --- sky-depth ---
     sky_depth_parser = subparsers.add_parser(
-        "sky-depth", help="Override sky-region depth values.",
-    )
-    sky_depth_parser.add_argument(
-        "--config", "-c", type=str, required=True,
-        help="Path to the dataset configuration JSON file.",
+        "sky-depth", parents=[common], help="Override sky-region depth values.",
     )
     sky_depth_parser.set_defaults(func=_cmd_sky_depth)
 
-    # --- radial ---
     radial_parser = subparsers.add_parser(
-        "radial", help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
-    )
-    radial_parser.add_argument(
-        "--config", "-c", type=str, required=True,
-        help="Path to the dataset configuration JSON file.",
+        "radial", parents=[common],
+        help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
     )
     radial_parser.set_defaults(func=_cmd_radial)
 
