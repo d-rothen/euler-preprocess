@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 
-def _parse_modality_entry(entry: str | dict) -> dict:
-    """Normalise a modality config entry to ``{path, split}``."""
+def _make_modality(entry: str | dict):
+    from euler_loading import Modality
+
     if isinstance(entry, str):
-        return {"path": entry}
-    return entry
+        return Modality(entry)
+    return Modality(entry["path"], split=entry.get("split"))
 
 
 def build_dataset(
@@ -15,19 +16,15 @@ def build_dataset(
 ):
     """Build a ``MultiModalDataset`` from a config dict.
 
-    Args:
-        config: Top-level dataset config containing ``modalities`` and
-            optionally ``hierarchical_modalities`` mappings.  Each modality
-            value may be a plain path string or a dict with ``path`` and
-            an optional ``split`` key.
-        required_modalities: Set of modality names that must be present.
-        required_hierarchical: Optional set of hierarchical modality names
-            that must be present.
-
-    Returns:
-        A ``MultiModalDataset`` instance.
+    Each modality entry is either a plain path string or a dict with
+    ``path`` and optional ``split``.  Loader resolution (which function to
+    call, which module to use) is handled by euler-loading via the
+    ds-crawler index at each path — point the config at a path whose
+    index declares the function you want (e.g. a ``sky_mask`` index for
+    boolean sky masks vs. a ``class_segmentation`` index for raw class
+    id maps).
     """
-    from euler_loading import Modality, MultiModalDataset
+    from euler_loading import MultiModalDataset
 
     raw_modalities = config.get("modalities", {})
     raw_hierarchical = config.get("hierarchical_modalities", {})
@@ -48,15 +45,10 @@ def build_dataset(
                 f"contain at least: {', '.join(sorted(required_hierarchical))}"
             )
 
-    modalities = {}
-    for name, entry in raw_modalities.items():
-        parsed = _parse_modality_entry(entry)
-        modalities[name] = Modality(parsed["path"], split=parsed.get("split"))
-
-    hierarchical_modalities = {}
-    for name, entry in raw_hierarchical.items():
-        parsed = _parse_modality_entry(entry)
-        hierarchical_modalities[name] = Modality(parsed["path"], split=parsed.get("split"))
+    modalities = {name: _make_modality(entry) for name, entry in raw_modalities.items()}
+    hierarchical_modalities = {
+        name: _make_modality(entry) for name, entry in raw_hierarchical.items()
+    }
 
     return MultiModalDataset(
         modalities=modalities,
