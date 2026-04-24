@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,39 @@ from euler_preprocess.common.io import OutputWriter
 PIPELINE_OUTPUTS_MANIFEST_VERSION = 1
 _PIPELINE_OUTPUT_STORAGE_KINDS = {"directory", "zip", "file"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+@dataclass(frozen=True)
+class OutputSlotSpec:
+    """Auxiliary-slot spec for transforms producing more than one modality.
+
+    Auxiliary slots reuse the source modality's hierarchy/indexing so the
+    written files line up with the input dataset, but supply their own writer
+    and ds-crawler metadata so the resulting on-disk dataset advertises the
+    correct modality type and loader.
+
+    Attributes:
+        source_modality: Name of the input modality whose hierarchy and
+            per-sample basenames are mirrored when writing auxiliary outputs.
+        writer: Writer callable invoked as ``writer(target, value, meta)``.
+            ``target`` is either a filesystem path (``str``/``PathLike``) or a
+            binary stream (when the writer is marked stream-supported and the
+            output is a zip).
+        index_overlay: Mapping merged on top of the source modality's
+            ``index_output`` to produce the ds-crawler head metadata for this
+            slot.  Use this to override ``name``/``type``/``euler_train``/
+            ``euler_loading``/``meta`` while inheriting indexing/hierarchy.
+        output_extension: When set (e.g. ``".npy"``), source basenames are
+            rewritten with this extension before writing.
+        meta: Optional ``modality_meta`` passed to the writer.  Defaults to
+            the ``meta`` field from the merged ``index_overlay`` when set there.
+    """
+
+    source_modality: str
+    writer: Callable[..., None]
+    index_overlay: dict[str, Any]
+    output_extension: str | None = None
+    meta: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +252,7 @@ class SourceBackedOutputBackend:
         dataset_writer: DatasetWriter | ZipDatasetWriter,
         modality_writer: Any,
         modality_meta: dict[str, Any] | None,
+        output_extension: str | None = None,
         pipeline_manifest_path: Path | None = None,
         pipeline_manifest_targets: list[PipelineOutputTargetConfig] | None = None,
     ) -> None:
@@ -226,6 +261,7 @@ class SourceBackedOutputBackend:
         self.dataset_writer = dataset_writer
         self.modality_writer = modality_writer
         self.modality_meta = modality_meta
+        self.output_extension = output_extension
         self.pipeline_manifest_path = pipeline_manifest_path
         self.pipeline_manifest_targets = pipeline_manifest_targets or []
 
@@ -254,8 +290,13 @@ class SourceBackedOutputBackend:
                 "requires sample['meta'][source_modality]['path']."
             )
 
-        basename = Path(str(source_meta["path"])).name
-        relative_path = str(source_meta["path"])
+        source_path = Path(str(source_meta["path"]))
+        if self.output_extension is not None:
+            basename = source_path.stem + self.output_extension
+            relative_path = str(source_path.with_suffix(self.output_extension))
+        else:
+            basename = source_path.name
+            relative_path = str(source_path)
         source_meta_copy = dict(source_meta)
 
         if isinstance(self.dataset_writer, ZipDatasetWriter):
@@ -380,7 +421,11 @@ def prepare_output_backend(
     dataset: MultiModalDataset,
     transform_class: type,
 ) -> SourceBackedOutputBackend:
-    """Create a source-backed output backend for a transform run."""
+    """Create a source-backed output backend for a transform run.
+
+    Used for the *primary* output slot.  Transforms with auxiliary outputs
+    should use :func:`prepare_output_backends` (plural).
+    """
 
     source_modality = getattr(transform_class, "SOURCE_MODALITY", None)
     if not isinstance(source_modality, str) or not source_modality:
@@ -436,3 +481,184 @@ def prepare_output_backend(
         pipeline_manifest_path=pipeline_manifest_path,
         pipeline_manifest_targets=[pipeline_target] if pipeline_target else [],
     )
+
+
+def _build_auxiliary_backend(
+    *,
+    spec: OutputSlotSpec,
+    pipeline_target: PipelineOutputTargetConfig,
+    dataset: MultiModalDataset,
+) -> SourceBackedOutputBackend:
+    """Create a backend for an auxiliary slot using its OutputSlotSpec.
+
+    The auxiliary backend does not own the pipeline manifest — that is
+    aggregated and written by the primary backend.
+    """
+
+    if pipeline_target.storage == "file":
+        raise ValueError(
+            f"Pipeline output target '{pipeline_target.slot}' uses "
+            "unsupported storage='file'"
+        )
+
+    root = Path(pipeline_target.path)
+    zip_mode = pipeline_target.storage == "zip"
+
+    base_index = dataset.get_modality_index(spec.source_modality)
+    index_output = _build_auxiliary_index(base_index, spec)
+
+    dataset_writer = create_dataset_writer_from_index(
+        index_output=index_output,
+        root=root,
+        zip=zip_mode,
+    )
+
+    modality_meta = spec.meta
+    if modality_meta is None:
+        head = index_output.get("head") or {}
+        modality_meta = (head.get("modality") or {}).get("meta")
+        if modality_meta is None:
+            modality_meta = index_output.get("meta")
+
+    return SourceBackedOutputBackend(
+        source_modality=spec.source_modality,
+        root=root,
+        dataset_writer=dataset_writer,
+        modality_writer=spec.writer,
+        modality_meta=modality_meta,
+        output_extension=spec.output_extension,
+        pipeline_manifest_path=None,
+        pipeline_manifest_targets=[],
+    )
+
+
+def _build_auxiliary_index(
+    base_index: dict[str, Any], spec: OutputSlotSpec
+) -> dict[str, Any]:
+    """Apply ``spec.index_overlay`` to a copy of ``base_index``.
+
+    The overlay's recognised keys map to fields used by ds-crawler's writer
+    construction.  ``name`` / ``type`` rewrite the dataset id+name and
+    modality key on both the contract head and the legacy top-level fields;
+    ``meta`` overrides the modality's meta dict; ``euler_train`` /
+    ``euler_loading`` replace those addon entries.  Any other overlay keys
+    are passed through as top-level fields for the legacy writer path.
+    """
+
+    overlay = dict(spec.index_overlay)
+    index_output: dict[str, Any] = {**base_index}
+
+    head = base_index.get("head")
+    if isinstance(head, dict):
+        new_head = json.loads(json.dumps(head))  # deep copy via JSON
+        new_head.setdefault("dataset", {})
+        new_head.setdefault("modality", {})
+        new_head.setdefault("addons", {})
+
+        if "name" in overlay:
+            name = overlay["name"]
+            new_head["dataset"]["id"] = name
+            new_head["dataset"]["name"] = name
+        if "type" in overlay:
+            new_head["modality"]["key"] = overlay["type"]
+        if "meta" in overlay:
+            new_head["modality"]["meta"] = dict(overlay["meta"])
+        if "euler_train" in overlay:
+            new_head["addons"]["euler_train"] = dict(overlay["euler_train"])
+        if "euler_loading" in overlay:
+            new_head["addons"]["euler_loading"] = dict(overlay["euler_loading"])
+
+        index_output["head"] = new_head
+
+    # Legacy top-level fields used by the non-contract writer construction
+    # path.  Preserved alongside the head for compatibility.
+    for key, value in overlay.items():
+        if isinstance(value, dict):
+            index_output[key] = dict(value)
+        else:
+            index_output[key] = value
+
+    return index_output
+
+
+def _resolve_primary_slot(transform_class: type) -> str:
+    """Return the *primary* slot name declared by *transform_class*."""
+
+    output_slots = getattr(transform_class, "OUTPUT_SLOTS", None)
+    if output_slots:
+        return output_slots[0]
+
+    output_slot = getattr(transform_class, "OUTPUT_SLOT", None)
+    if isinstance(output_slot, str) and output_slot:
+        return output_slot
+
+    source_modality = getattr(transform_class, "SOURCE_MODALITY", None)
+    if isinstance(source_modality, str) and source_modality:
+        return source_modality
+
+    raise ValueError(
+        f"{transform_class.__name__} declares no output slot "
+        "(set OUTPUT_SLOT, OUTPUT_SLOTS, or SOURCE_MODALITY)"
+    )
+
+
+def prepare_output_backends(
+    config: dict[str, Any],
+    dataset: MultiModalDataset,
+    transform_class: type,
+) -> dict[str, SourceBackedOutputBackend]:
+    """Create per-slot output backends for *transform_class*.
+
+    Returns ``{slot_name: backend}``.  The primary slot (the first entry of
+    ``OUTPUT_SLOTS``, falling back to ``OUTPUT_SLOT`` / ``SOURCE_MODALITY``) is
+    always present.  Auxiliary slots declared in
+    :attr:`Transform.OUTPUT_SLOT_SPECS` are included only when the dataset
+    config's ``pipeline.output_targets`` contains a matching entry; otherwise
+    the slot is silently omitted (auxiliary outputs are opt-in).
+
+    The returned dict's iteration order matches the declared
+    ``OUTPUT_SLOTS`` order.
+    """
+
+    primary_slot = _resolve_primary_slot(transform_class)
+    primary_backend = prepare_output_backend(config, dataset, transform_class)
+    backends: dict[str, SourceBackedOutputBackend] = {primary_slot: primary_backend}
+
+    slot_specs = getattr(transform_class, "OUTPUT_SLOT_SPECS", None) or {}
+    pipeline = parse_pipeline_config(config)
+
+    declared_slots = getattr(transform_class, "OUTPUT_SLOTS", ()) or ()
+    aux_slots = [s for s in declared_slots if s != primary_slot]
+    if pipeline is not None and slot_specs:
+        for slot in aux_slots:
+            spec = slot_specs.get(slot)
+            if spec is None:
+                continue
+            target = pipeline.get_output_target(slot)
+            if target is None:
+                continue
+            backends[slot] = _build_auxiliary_backend(
+                spec=spec,
+                pipeline_target=target,
+                dataset=dataset,
+            )
+
+    # Aggregate every slot we actually wrote into the manifest the primary
+    # backend will emit, so a single manifest documents the full set.
+    if (
+        pipeline is not None
+        and pipeline.outputs_manifest_path
+        and len(backends) > 1
+    ):
+        manifest_targets: list[PipelineOutputTargetConfig] = list(
+            primary_backend.pipeline_manifest_targets
+        )
+        for slot in aux_slots:
+            if slot not in backends:
+                continue
+            target = pipeline.get_output_target(slot)
+            if target is not None:
+                manifest_targets.append(target)
+        primary_backend.pipeline_manifest_targets = manifest_targets
+
+    return backends

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.logging import get_logger, log_dataset_info
-from euler_preprocess.common.output import prepare_output_backend
+from euler_preprocess.common.output import prepare_output_backends
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,8 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
     required_modalities = transform_class.REQUIRED_MODALITIES
     required_hierarchical = transform_class.REQUIRED_HIERARCHICAL_MODALITIES or None
     dataset = build_dataset(config, required_modalities, required_hierarchical)
-    output_backend = prepare_output_backend(config, dataset, transform_class)
+    output_backends = prepare_output_backends(config, dataset, transform_class)
+    primary_backend = next(iter(output_backends.values()))
     dataset_name = config.get("dataset", "dataset")
 
     raw_modalities = {
@@ -69,14 +70,25 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         else:
             modality_info[name] = entry
     log_dataset_info(logger, dataset_name, len(dataset), modality_info, use_gpu)
-    logger.info("Output path: %s", output_backend.root)
+    for slot, backend in output_backends.items():
+        logger.info("Output path [%s]: %s", slot, backend.root)
 
     transform_kwargs: dict = {
         "config_path": str(transform_config_path),
-        "out_path": str(output_backend.root),
-        "output_backend": output_backend,
+        "out_path": str(primary_backend.root),
     }
     init_params = inspect.signature(transform_class.__init__).parameters
+    if "output_backends" in init_params:
+        transform_kwargs["output_backends"] = output_backends
+    else:
+        transform_kwargs["output_backend"] = primary_backend
+        if len(output_backends) > 1:
+            extra = [s for s in output_backends if s != next(iter(output_backends))]
+            logger.warning(
+                "%s does not accept output_backends; ignoring auxiliary slots: %s",
+                transform_class.__name__,
+                extra,
+            )
     if "strict" in init_params:
         transform_kwargs["strict"] = bool(getattr(args, "strict", False))
     elif getattr(args, "strict", False):

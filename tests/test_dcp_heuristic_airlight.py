@@ -146,7 +146,7 @@ class TestDCPHeuristicAirlight:
             "atmospheric_light": "dcp_heuristic",
         }
 
-        _, _, airlight = apply_model(
+        _, _, airlight, _, _ = apply_model(
             rgb,
             depth,
             "uniform",
@@ -239,7 +239,7 @@ class TestDCPHeuristicAirlightTorch:
         depth_t = torch.ones((2, 2), dtype=torch.float32)
         estimated_airlight = torch.tensor([0.4, 0.5, 0.6], dtype=torch.float32)
 
-        _, _, airlight = foggify._apply_model_torch(
+        _, _, airlight, _, _ = foggify._apply_model_torch(
             rgb_t,
             depth_t,
             "uniform",

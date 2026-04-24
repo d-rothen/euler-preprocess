@@ -243,6 +243,33 @@ def uses_estimated_airlight(al_spec) -> bool:
     return al_spec is None or al_spec in AIRLIGHT_METHODS
 
 
+def broadcast_k_field(k_field: Any, height: int, width: int) -> np.ndarray:
+    """Return ``k_field`` as a ``(H, W)`` float32 map (broadcasting if scalar)."""
+    arr = np.asarray(k_field, dtype=np.float32)
+    if arr.ndim == 0:
+        return np.broadcast_to(arr, (height, width)).astype(np.float32, copy=True)
+    if arr.shape == (height, width):
+        return arr.astype(np.float32, copy=False)
+    raise ValueError(
+        f"k_field must be scalar or shape ({height}, {width}); got {arr.shape}"
+    )
+
+
+def broadcast_ls_field(ls_field: Any, height: int, width: int) -> np.ndarray:
+    """Return ``ls_field`` as a ``(H, W, 3)`` float32 map (broadcasting if needed)."""
+    arr = np.asarray(ls_field, dtype=np.float32)
+    if arr.shape == (3,):
+        return np.broadcast_to(arr, (height, width, 3)).astype(np.float32, copy=True)
+    if arr.shape == (1, 1, 3):
+        return np.broadcast_to(arr, (height, width, 3)).astype(np.float32, copy=True)
+    if arr.shape == (height, width, 3):
+        return arr.astype(np.float32, copy=False)
+    raise ValueError(
+        f"ls_field must have shape (3,), (1, 1, 3), or "
+        f"({height}, {width}, 3); got {arr.shape}"
+    )
+
+
 def apply_model(
     rgb: np.ndarray,
     depth_m: np.ndarray,
@@ -251,7 +278,18 @@ def apply_model(
     rng: np.random.Generator,
     contrast_threshold_default: float,
     estimated_airlight: np.ndarray,
-) -> tuple[np.ndarray, float, np.ndarray]:
+) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply a fog model to ``rgb``.
+
+    Returns:
+        Tuple ``(foggy, k_mean, ls_base, k_map, ls_map)``:
+
+        * ``foggy``: ``(H, W, 3)`` foggy RGB image.
+        * ``k_mean``: scalar mean scattering coefficient (for filenames/logs).
+        * ``ls_base``: ``(3,)`` base atmospheric light (for filenames/logs).
+        * ``k_map``: ``(H, W)`` β-field actually used (broadcast for uniform).
+        * ``ls_map``: ``(H, W, 3)`` L_s-field actually used (broadcast for uniform).
+    """
     if model_name not in DEFAULT_MODEL_CONFIGS:
         raise ValueError(f"Unsupported fog model: {model_name}")
     visibility = float(sample_value(model_cfg.get("visibility_m"), rng))
@@ -269,14 +307,19 @@ def apply_model(
         sampled_al = sample_value(al_spec, rng)
         ls_base = normalize_atmospheric_light(np.asarray(sampled_al))
 
+    height, width = depth_m.shape
+
     if model_name == "uniform":
         ls_field = ls_base.reshape(1, 1, 3)
-        return apply_fog(rgb, depth_m, k_mean, ls_field), k_mean, ls_base
+        foggy = apply_fog(rgb, depth_m, k_mean, ls_field)
+        k_map = broadcast_k_field(k_mean, height, width)
+        ls_map = broadcast_ls_field(ls_base, height, width)
+        return foggy, k_mean, ls_base, k_map, ls_map
 
     if model_name in ("heterogeneous_k", "heterogeneous_k_ls"):
         k_cfg = model_cfg.get("k_hetero", {})
-        k_scales = resolve_scales(k_cfg, depth_m.shape[0], depth_m.shape[1], rng)
-        k_noise = perlin_fbm(depth_m.shape[0], depth_m.shape[1], k_scales, rng)
+        k_scales = resolve_scales(k_cfg, height, width, rng)
+        k_noise = perlin_fbm(height, width, k_scales, rng)
         min_factor = float(sample_value(k_cfg.get("min_factor", 1.0), rng))
         max_factor = float(sample_value(k_cfg.get("max_factor", 1.0), rng))
         k_field = modulate_with_noise(
@@ -291,8 +334,8 @@ def apply_model(
 
     if model_name in ("heterogeneous_ls", "heterogeneous_k_ls"):
         ls_cfg = model_cfg.get("ls_hetero", {})
-        ls_scales = resolve_scales(ls_cfg, depth_m.shape[0], depth_m.shape[1], rng)
-        ls_noise = perlin_fbm(depth_m.shape[0], depth_m.shape[1], ls_scales, rng)
+        ls_scales = resolve_scales(ls_cfg, height, width, rng)
+        ls_noise = perlin_fbm(height, width, ls_scales, rng)
         min_factor = float(sample_value(ls_cfg.get("min_factor", 1.0), rng))
         max_factor = float(sample_value(ls_cfg.get("max_factor", 1.0), rng))
         ls_field = modulate_with_noise(
@@ -306,4 +349,7 @@ def apply_model(
     else:
         ls_field = ls_base.reshape(1, 1, 3)
 
-    return apply_fog(rgb, depth_m, k_field, ls_field), k_mean, ls_base
+    foggy = apply_fog(rgb, depth_m, k_field, ls_field)
+    k_map = broadcast_k_field(k_field, height, width)
+    ls_map = broadcast_ls_field(ls_field, height, width)
+    return foggy, k_mean, ls_base, k_map, ls_map
