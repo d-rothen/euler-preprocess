@@ -331,6 +331,76 @@ def test_aux_outputs_carry_correct_index_metadata(tmp_path: Path) -> None:
     assert airlight_index["euler_train"]["used_as"] == "target"
 
 
+def test_primary_slot_auto_selected_when_aliased(tmp_path: Path) -> None:
+    """A pipeline target whose slot is *not* one of the aux slot names is
+    automatically picked up as the primary RGB target — even when its slot
+    name doesn't match the transform's primary slot (e.g. ``"fog"``).
+    """
+    dataset = _make_dataset(tmp_path)
+    pipeline_root = tmp_path / "pipeline_root_alias"
+    manifest_path = pipeline_root / ".euler_pipeline" / "pipeline_outputs.json"
+    config = {
+        "pipeline": {
+            "output_root": str(pipeline_root),
+            "outputs_manifest_path": str(manifest_path),
+            "output_targets": [
+                {
+                    "slot": "fog",
+                    "datasetType": "rgb",
+                    "relativePath": "foggy_rgb.zip",
+                    "path": str(pipeline_root / "foggy_rgb.zip"),
+                    "storage": "zip",
+                },
+                {
+                    "slot": ATMOSPHERIC_LIGHT_SLOT,
+                    "datasetType": "rgb",
+                    "relativePath": "atmospheric_light.zip",
+                    "path": str(pipeline_root / "atmospheric_light.zip"),
+                    "storage": "zip",
+                },
+                {
+                    "slot": SCATTERING_COEFFICIENT_SLOT,
+                    "datasetType": "rgb",
+                    "relativePath": "scattering_coefficient.zip",
+                    "path": str(pipeline_root / "scattering_coefficient.zip"),
+                    "storage": "zip",
+                },
+            ],
+        }
+    }
+
+    backends = prepare_output_backends(config, dataset, FogTransform)
+
+    assert set(backends.keys()) == {
+        "rgb",
+        SCATTERING_COEFFICIENT_SLOT,
+        ATMOSPHERIC_LIGHT_SLOT,
+    }
+    # Primary backend points at the "fog" target, not a literal "rgb" target.
+    assert backends["rgb"].root == pipeline_root / "foggy_rgb.zip"
+
+    transform = FogTransform(
+        config_path=str(_write_fog_config(tmp_path / "fog_cfg.json")),
+        out_path=str(backends["rgb"].root),
+        output_backends=backends,
+    )
+    transform.run(dataset)
+
+    import zipfile
+
+    with zipfile.ZipFile(pipeline_root / "foggy_rgb.zip", "r") as zf:
+        assert "Scene01/Camera_0/00001.png" in zf.namelist()
+    with zipfile.ZipFile(pipeline_root / "scattering_coefficient.zip", "r") as zf:
+        assert "Scene01/Camera_0/00001.npy" in zf.namelist()
+    with zipfile.ZipFile(pipeline_root / "atmospheric_light.zip", "r") as zf:
+        assert "Scene01/Camera_0/00001.npy" in zf.namelist()
+
+    # Manifest still lists every active slot in declaration order.
+    manifest = json.loads(manifest_path.read_text())
+    slots = [target["slot"] for target in manifest["outputs"]]
+    assert slots == ["fog", SCATTERING_COEFFICIENT_SLOT, ATMOSPHERIC_LIGHT_SLOT]
+
+
 def test_apply_model_returns_full_size_maps_for_uniform() -> None:
     """Sanity-check the broadcast logic on the model layer."""
     from euler_preprocess.fog.models import apply_model
