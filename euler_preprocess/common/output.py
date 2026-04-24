@@ -381,11 +381,29 @@ def _select_pipeline_target(
                 f"pipeline.output_targets does not contain slot '{slot}'"
             )
 
-    if len(pipeline.output_targets) == 1:
-        return pipeline.output_targets[0]
+    # Auxiliary slot names declared by the transform are reserved for
+    # OUTPUT_SLOT_SPECS and routed by prepare_output_backends; ignore them
+    # when picking the *primary* target.  This lets pipeline configs use
+    # arbitrary slot aliases (e.g. ``"fog"`` for the primary RGB output)
+    # alongside named auxiliary outputs.
+    aux_slots = set((getattr(transform_class, "OUTPUT_SLOT_SPECS", None) or {}).keys())
+    primary_candidates = [
+        t for t in pipeline.output_targets if t.slot not in aux_slots
+    ]
+
+    if len(primary_candidates) == 1:
+        return primary_candidates[0]
+
+    if not primary_candidates:
+        raise ValueError(
+            f"pipeline.output_targets has no primary target for "
+            f"{transform_class.__name__}; only auxiliary slots present "
+            f"({sorted(aux_slots)}). Add a target for the primary output."
+        )
 
     raise ValueError(
-        "pipeline.output_targets contains multiple entries; set top-level "
+        "pipeline.output_targets contains multiple primary entries "
+        f"({[t.slot for t in primary_candidates]}); set top-level "
         "'output_slot' to select the target for this transform."
     )
 
