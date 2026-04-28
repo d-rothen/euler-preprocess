@@ -128,6 +128,7 @@ Controls the fog simulation.
   "contrast_threshold": 0.05,
   "device": "cpu",
   "gpu_batch_size": 4,
+  "augmentations": { ... },
   "selection": { ... },
   "models": { ... }
 }
@@ -142,6 +143,7 @@ Controls the fog simulation.
 | `contrast_threshold` | Threshold *C_t* used in the visibility-to-attenuation conversion (default `0.05`). |
 | `device` | `"cpu"`, `"cuda"`, `"mps"`, or `"gpu"` (alias for cuda). |
 | `gpu_batch_size` | Batch size when running on GPU. Uniform-model samples are batched; heterogeneous samples are processed individually. |
+| `augmentations` | Optional stepped augmentation set. When present, every input sample produces every configured augmentation and uses the file-id hierarchy output layout described below. |
 
 ### Fog Model
 
@@ -242,6 +244,65 @@ Each model specifies a `visibility_m` distribution from which a visibility dista
 
 The sampled visibility *V* is converted to the attenuation coefficient: **k = -ln(C_t) / V**.
 
+### Stepped Augmentations
+
+For benchmark generation, set `augmentations` in the fog config. This switches
+the fog transform from one sampled output per input to one output per configured
+variant:
+
+```json
+{
+  "airlight": "from_sky",
+  "seed": 1337,
+  "contrast_threshold": 0.05,
+  "augmentations": {
+    "file_id_hierarchy_name": "file_id",
+    "attribute_key": "fog_augmentation",
+    "models": ["uniform"],
+    "visibility_m": [10, 20, 40, 70, 100],
+    "airlight_methods": ["from_sky"]
+  }
+}
+```
+
+The matrix form above expands as the Cartesian product of `models`,
+`visibility_m` (MOR in metres), optional `scattering_coefficients` / `beta`, and
+airlight choices. `file_id_hierarchy_name` names the inserted hierarchy level
+when the underlying ds-crawler writer has a hierarchy separator; the directory
+name is the source file id in either case. For tighter control, use explicit
+variants:
+
+```json
+"augmentations": {
+  "variants": [
+    {
+      "id": "mor_010m_sky",
+      "model": "uniform",
+      "visibility_m": 10,
+      "airlight_method": "from_sky"
+    },
+    {
+      "id": "beta_0.15_white",
+      "model": "heterogeneous_k",
+      "scattering_coefficient": 0.15,
+      "atmospheric_light": [1.0, 1.0, 1.0],
+      "k_hetero": {
+        "scales": "auto",
+        "min_factor": 0.5,
+        "max_factor": 1.5,
+        "normalize_to_mean": true
+      }
+    }
+  ]
+}
+```
+
+Each output entry receives per-file ds-crawler attributes under
+`fog_augmentation`, including the augmentation id, source id, source full id,
+model, actual scattering coefficient, actual atmospheric light, and configured
+MOR/beta descriptors when available. euler-loading exposes these as
+`sample["attributes"]["rgb"]["fog_augmentation"]`.
+
 ### Heterogeneous Noise Fields
 
 Both `k_hetero` and `ls_hetero` use Perlin FBM (fractional Brownian motion) to generate spatially-varying factor fields:
@@ -282,6 +343,22 @@ the result stays loadable by `euler-loading`:
 When a pipeline target is present, `pipeline.output_targets[].path` replaces
 `output_path` entirely. Standalone/direct `FogTransform(...)` usage without the
 CLI still uses the legacy per-model layout with `config.json` sidecars.
+
+With `augmentations` enabled, source-backed outputs are written one level below
+the source file id instead:
+
+```
+<output_path>/
+  .ds_crawler/output.json
+  Scene01/
+    Camera_0/
+      00000/
+        mor_10m_airlight_from_sky.png
+        mor_20m_airlight_from_sky.png
+```
+
+Auxiliary `scattering_coefficient` and `atmospheric_light` pipeline targets use
+the same file-id hierarchy and write matching `.npy` augmentation files.
 
 ---
 

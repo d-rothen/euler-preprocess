@@ -20,9 +20,14 @@ from euler_preprocess.common.normalize import (
     normalize_sky_mask,
 )
 from euler_preprocess.common.output import LegacyOutputBackend, OutputSlotSpec
-from euler_preprocess.common.sampling import format_value, sample_value
+from euler_preprocess.common.sampling import deep_merge, format_value, sample_value
 from euler_preprocess.common.transform import Transform
 from euler_preprocess.fog.airlight_from_sky import AirlightFromSky
+from euler_preprocess.fog.augmentations import (
+    FogAugmentationConfig,
+    FogAugmentationSpec,
+    parse_fog_augmentations,
+)
 from euler_preprocess.fog.dcp_airlight import DCPAirlight
 from euler_preprocess.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
 from euler_preprocess.fog.logging import log_config
@@ -36,10 +41,10 @@ from euler_preprocess.fog.models import (
     modulate_with_noise_torch,
     normalize_atmospheric_light_torch,
     resolve_model_config,
+    resolve_scattering_coefficient,
     resolve_scales,
     select_model,
     uses_estimated_airlight,
-    visibility_to_k,
 )
 from euler_loading.loaders.cpu.generic import (
     write_map_2d as _write_map_2d,
@@ -165,6 +170,10 @@ class FogTransform(Transform):
         )
         self.depth_scale = float(self.config.get("depth_scale", 1.0))
         self.resize_depth_flag = bool(self.config.get("resize_depth", True))
+        self.augmentation_config: FogAugmentationConfig = parse_fog_augmentations(
+            self.config
+        )
+        self.augmentation_specs = list(self.augmentation_config.specs)
         self._written_configs: set[str] = set()
         self.torch_device = None
         self.use_gpu = False
@@ -214,6 +223,9 @@ class FogTransform(Transform):
             )
             if key in dcp_heuristic_cfg
         }
+        self.dcp_heuristic_kwargs = dcp_heuristic_kwargs
+        self._airlight_estimators: dict[str, Any] = {}
+        self._airlight_estimators_torch: dict[str, Any] = {}
         self.airlight_estimator_torch = None
         if airlight_method == "from_sky":
             self.airlight_estimator = AirlightFromSky(sky_depth_threshold=0.0)
@@ -231,6 +243,11 @@ class FogTransform(Transform):
                 self.airlight_estimator_torch = DCPHeuristicAirlightTorch(
                     **dcp_heuristic_kwargs
                 )
+        self._airlight_estimators[airlight_method] = self.airlight_estimator
+        if self.airlight_estimator_torch is not None:
+            self._airlight_estimators_torch[airlight_method] = (
+                self.airlight_estimator_torch
+            )
 
     def run(self, samples: Iterable[dict]) -> list[Path]:
         """Run the fog transform. Alias for :meth:`generate_fog`."""
@@ -252,6 +269,205 @@ class FogTransform(Transform):
 
     def _configure_device(self) -> None:
         self.torch_device, self.use_gpu = configure_device(self.device)
+
+    def _rng_for(self, sample_index: int, augmentation_index: int | None = None):
+        if self.seed is not None:
+            seed_parts: list[int] = [int(self.seed), int(sample_index)]
+            if augmentation_index is not None:
+                seed_parts.append(int(augmentation_index))
+            return np.random.default_rng(np.random.SeedSequence(seed_parts))
+        return self.base_rng
+
+    def _get_airlight_estimator(self, method: str):
+        estimator = self._airlight_estimators.get(method)
+        if estimator is not None:
+            return estimator
+        if method == "from_sky":
+            estimator = AirlightFromSky(sky_depth_threshold=0.0)
+        elif method == "dcp":
+            estimator = DCPAirlight()
+        elif method == "dcp_heuristic":
+            estimator = DCPHeuristicAirlight(**self.dcp_heuristic_kwargs)
+        else:
+            raise ValueError(
+                f"Unknown airlight method '{method}'. Supported values: "
+                f"{AIRLIGHT_METHODS}"
+            )
+        self._airlight_estimators[method] = estimator
+        return estimator
+
+    def _get_airlight_estimator_torch(self, method: str):
+        estimator = self._airlight_estimators_torch.get(method)
+        if estimator is not None:
+            return estimator
+        if torch is None:
+            return None
+        if method == "dcp":
+            from euler_preprocess.fog.dcp_airlight_torch import DCPAirlightTorch
+
+            estimator = DCPAirlightTorch()
+        elif method == "dcp_heuristic":
+            from euler_preprocess.fog.dcp_heuristic_airlight_torch import (
+                DCPHeuristicAirlightTorch,
+            )
+
+            estimator = DCPHeuristicAirlightTorch(**self.dcp_heuristic_kwargs)
+        else:
+            return None
+        self._airlight_estimators_torch[method] = estimator
+        return estimator
+
+    def _estimate_airlight_np(
+        self,
+        rgb: np.ndarray,
+        sky_mask: np.ndarray,
+        *,
+        sample_id: str | None,
+        method: str | None = None,
+    ) -> np.ndarray:
+        resolved_method = method or self.airlight_method
+        estimator = self._get_airlight_estimator(resolved_method)
+        return estimator.estimate_airlight(rgb, sky_mask, sample_id=sample_id)
+
+    def _estimate_airlight_torch(
+        self,
+        rgb_t: "torch.Tensor",
+        sky_mask_t: "torch.Tensor",
+        *,
+        sample_id: str | None,
+        method: str | None = None,
+    ) -> "torch.Tensor":
+        resolved_method = method or self.airlight_method
+        if resolved_method == "from_sky":
+            return estimate_airlight_torch(rgb_t, sky_mask_t, sample_id=sample_id)
+        estimator = self._get_airlight_estimator_torch(resolved_method)
+        if estimator is None:
+            raise RuntimeError(
+                f"Torch airlight estimator unavailable for method "
+                f"'{resolved_method}'."
+            )
+        if resolved_method == "dcp":
+            return estimator.compute(rgb_t)
+        return estimator.estimate_airlight(
+            rgb_t,
+            sky_mask_t,
+            sample_id=sample_id,
+        )
+
+    def _resolve_augmented_model(
+        self,
+        augmentation: FogAugmentationSpec,
+    ) -> tuple[str, dict]:
+        base_cfg = resolve_model_config(augmentation.model_name, self.models_cfg)
+        return augmentation.model_name, deep_merge(base_cfg, augmentation.model_overrides)
+
+    def _source_extension(self, sample: dict, backend: Any | None = None) -> str:
+        meta = sample.get("meta")
+        source_modality = (
+            getattr(backend, "source_modality", None) or self.SOURCE_MODALITY or "rgb"
+        )
+        if isinstance(meta, dict):
+            source_meta = meta.get(source_modality)
+            if isinstance(source_meta, dict) and "path" in source_meta:
+                suffix = Path(str(source_meta["path"])).suffix
+                if suffix:
+                    return suffix
+        return ".png"
+
+    def _file_id_hierarchy_key(self, sample_id: str, backend: Any) -> str:
+        name = self.augmentation_config.file_id_hierarchy_name
+        separator = getattr(getattr(backend, "dataset_writer", None), "_separator", None)
+        if name and separator:
+            return f"{name}{separator}{sample_id}"
+        return sample_id
+
+    def _augmentation_full_id(
+        self,
+        sample: dict,
+        augmentation_id: str,
+        backend: Any,
+    ) -> str:
+        sample_id = str(sample.get("id", "?"))
+        full_id = str(sample.get("full_id") or f"/{sample_id}")
+        parts = [part for part in full_id.split("/") if part]
+        parent_parts = parts[:-1] if parts else []
+        file_id_key = self._file_id_hierarchy_key(sample_id, backend)
+        return "/" + "/".join(parent_parts + [file_id_key, augmentation_id])
+
+    def _augmentation_attributes(
+        self,
+        sample: dict,
+        augmentation: FogAugmentationSpec,
+        *,
+        model_name: str,
+        beta: float,
+        airlight: np.ndarray,
+    ) -> dict[str, Any]:
+        source_id = str(sample.get("id", "?"))
+        payload = {
+            "id": augmentation.id,
+            "source_id": source_id,
+            "source_full_id": str(sample.get("full_id") or f"/{source_id}"),
+            "model": model_name,
+            "scattering_coefficient": float(beta),
+            "atmospheric_light": [
+                float(v) for v in np.asarray(airlight, dtype=np.float32).reshape(-1)[:3]
+            ],
+            **augmentation.attributes,
+        }
+        return {self.augmentation_config.attribute_key: payload}
+
+    def _write_primary_output(
+        self,
+        sample: dict,
+        foggy: np.ndarray,
+        *,
+        sample_id: str,
+        model_name: str,
+        beta: float,
+        airlight: np.ndarray,
+        full_id: str | None,
+        augmentation: FogAugmentationSpec | None = None,
+    ) -> Path:
+        if self.output_backend.is_source_backed:
+            if augmentation is None:
+                return self.output_backend.write(sample, foggy)
+            output_full_id = self._augmentation_full_id(
+                sample,
+                augmentation.id,
+                self.output_backend,
+            )
+            output_basename = (
+                f"{augmentation.id}{self._source_extension(sample, self.output_backend)}"
+            )
+            attributes = self._augmentation_attributes(
+                sample,
+                augmentation,
+                model_name=model_name,
+                beta=beta,
+                airlight=airlight,
+            )
+            return self.output_backend.write(
+                sample,
+                foggy,
+                output_full_id=output_full_id,
+                output_basename=output_basename,
+                attributes=attributes,
+            )
+
+        output_path = self._build_output_path(
+            sample_id,
+            model_name,
+            beta,
+            airlight,
+            full_id=full_id,
+            augmentation_id=augmentation.id if augmentation else None,
+        )
+        return self.output_backend.write(
+            sample,
+            foggy,
+            default_path=output_path,
+        )
 
     def _generate_fog_cpu(self, samples: Iterable[dict]) -> list[Path]:
         try:
@@ -276,53 +492,94 @@ class FogTransform(Transform):
                     depth = planar_to_radial_depth(depth, intrinsics)
 
                 sky_mask = normalize_sky_mask(sample["semantic_segmentation"])
-                estimated_airlight = self.airlight_estimator.estimate_airlight(
-                    rgb, sky_mask, sample_id=sample.get("id")
-                )
 
-                if self.seed is not None:
-                    rng = np.random.default_rng(
-                        np.random.SeedSequence([self.seed, index])
+                if self.augmentation_specs:
+                    for aug_index, augmentation in enumerate(self.augmentation_specs):
+                        rng = self._rng_for(index, aug_index)
+                        model_name, model_cfg = self._resolve_augmented_model(
+                            augmentation
+                        )
+                        estimated_airlight = self._estimate_airlight_np(
+                            rgb,
+                            sky_mask,
+                            sample_id=sample.get("id"),
+                            method=augmentation.airlight_method,
+                        )
+                        foggy, beta, airlight, k_map, ls_map = apply_model(
+                            rgb,
+                            depth,
+                            model_name,
+                            model_cfg,
+                            rng,
+                            self.contrast_threshold_default,
+                            estimated_airlight,
+                        )
+                        saved_paths.append(
+                            self._write_primary_output(
+                                sample,
+                                foggy,
+                                sample_id=sample["id"],
+                                model_name=model_name,
+                                beta=beta,
+                                airlight=airlight,
+                                full_id=sample.get("full_id"),
+                                augmentation=augmentation,
+                            )
+                        )
+                        if not self.output_backend.is_source_backed:
+                            self._write_model_config(
+                                model_name,
+                                model_cfg,
+                                saved_paths,
+                            )
+                        self._write_auxiliary(
+                            sample,
+                            k_map=k_map,
+                            ls_map=ls_map,
+                            sample_id=sample["id"],
+                            model_name=model_name,
+                            full_id=sample.get("full_id"),
+                            beta=beta,
+                            airlight=airlight,
+                            augmentation=augmentation,
+                        )
+                else:
+                    estimated_airlight = self._estimate_airlight_np(
+                        rgb, sky_mask, sample_id=sample.get("id")
                     )
-                else:
-                    rng = self.base_rng
-
-                model_name = select_model(self.config, rng)
-                model_cfg = resolve_model_config(model_name, self.models_cfg)
-                foggy, beta, airlight, k_map, ls_map = apply_model(
-                    rgb,
-                    depth,
-                    model_name,
-                    model_cfg,
-                    rng,
-                    self.contrast_threshold_default,
-                    estimated_airlight,
-                )
-
-                if self.output_backend.is_source_backed:
-                    saved_paths.append(self.output_backend.write(sample, foggy))
-                else:
-                    output_path = self._build_output_path(
-                        sample["id"], model_name, beta, airlight,
-                        full_id=sample.get("full_id"),
+                    rng = self._rng_for(index)
+                    model_name = select_model(self.config, rng)
+                    model_cfg = resolve_model_config(model_name, self.models_cfg)
+                    foggy, beta, airlight, k_map, ls_map = apply_model(
+                        rgb,
+                        depth,
+                        model_name,
+                        model_cfg,
+                        rng,
+                        self.contrast_threshold_default,
+                        estimated_airlight,
                     )
                     saved_paths.append(
-                        self.output_backend.write(
+                        self._write_primary_output(
                             sample,
                             foggy,
-                            default_path=output_path,
+                            sample_id=sample["id"],
+                            model_name=model_name,
+                            beta=beta,
+                            airlight=airlight,
+                            full_id=sample.get("full_id"),
                         )
                     )
-                    self._write_model_config(model_name, model_cfg, saved_paths)
-
-                self._write_auxiliary(
-                    sample,
-                    k_map=k_map,
-                    ls_map=ls_map,
-                    sample_id=sample["id"],
-                    model_name=model_name,
-                    full_id=sample.get("full_id"),
-                )
+                    if not self.output_backend.is_source_backed:
+                        self._write_model_config(model_name, model_cfg, saved_paths)
+                    self._write_auxiliary(
+                        sample,
+                        k_map=k_map,
+                        ls_map=ls_map,
+                        sample_id=sample["id"],
+                        model_name=model_name,
+                        full_id=sample.get("full_id"),
+                    )
 
                 if bar is not None:
                     bar.update(1)
@@ -343,14 +600,11 @@ class FogTransform(Transform):
     ]:
         if model_name not in DEFAULT_MODEL_CONFIGS:
             raise ValueError(f"Unsupported fog model: {model_name}")
-        visibility = float(sample_value(model_cfg.get("visibility_m"), rng))
-        contrast_threshold = float(
-            sample_value(
-                model_cfg.get("contrast_threshold", self.contrast_threshold_default),
-                rng,
-            )
+        k_mean, _visibility, _contrast_threshold = resolve_scattering_coefficient(
+            model_cfg,
+            rng,
+            self.contrast_threshold_default,
         )
-        k_mean = visibility_to_k(visibility, contrast_threshold)
 
         al_spec = model_cfg.get("atmospheric_light", "from_sky")
         if uses_estimated_airlight(al_spec):
@@ -448,6 +702,8 @@ class FogTransform(Transform):
     def _generate_fog_gpu(self, samples: Iterable[dict]) -> list[Path]:
         if torch is None or self.torch_device is None:
             raise RuntimeError("Torch device not configured for GPU execution.")
+        if self.augmentation_specs:
+            return self._generate_fog_gpu_augmented(samples)
         device = self.torch_device
         try:
             total = len(samples)  # type: ignore[arg-type]
@@ -615,24 +871,14 @@ class FogTransform(Transform):
 
                         k_means: list[float] = []
                         for item in uniform_items:
-                            visibility = float(
-                                sample_value(
-                                    item["model_cfg"].get("visibility_m"),
+                            k_mean, _visibility, _contrast_threshold = (
+                                resolve_scattering_coefficient(
+                                    item["model_cfg"],
                                     item["rng"],
+                                    self.contrast_threshold_default,
                                 )
                             )
-                            contrast_threshold = float(
-                                sample_value(
-                                    item["model_cfg"].get(
-                                        "contrast_threshold",
-                                        self.contrast_threshold_default,
-                                    ),
-                                    item["rng"],
-                                )
-                            )
-                            k_means.append(
-                                visibility_to_k(visibility, contrast_threshold)
-                            )
+                            k_means.append(k_mean)
 
                         k_tensor = torch.tensor(
                             k_means, device=device, dtype=rgb_batch.dtype
@@ -798,6 +1044,112 @@ class FogTransform(Transform):
         self._finalize_backends()
         return saved_paths
 
+    def _generate_fog_gpu_augmented(self, samples: Iterable[dict]) -> list[Path]:
+        if torch is None or self.torch_device is None:
+            raise RuntimeError("Torch device not configured for GPU execution.")
+        device = self.torch_device
+        try:
+            total = len(samples)  # type: ignore[arg-type]
+        except TypeError:
+            samples = list(samples)
+            total = len(samples)
+        saved_paths: list[Path] = []
+
+        with progress_bar(total, "GPU", self.logger) as bar:
+            for index, sample in enumerate(samples):
+                rgb_np = _to_numpy(sample["rgb"])
+                if _is_chw(rgb_np):
+                    rgb_np = np.transpose(rgb_np, (1, 2, 0))
+                depth_np = normalize_depth(
+                    sample["depth"], rgb_np.shape[:2], self.resize_depth_flag
+                )
+                rgb_t = normalize_rgb_torch(rgb_np, device)
+                depth_t = torch.from_numpy(depth_np).to(
+                    device=device,
+                    dtype=torch.float32,
+                )
+                depth_t = torch.clamp(depth_t * self.depth_scale, min=0.0)
+                intrinsics = extract_intrinsics(sample)
+                if intrinsics is not None:
+                    K_t = torch.from_numpy(intrinsics).to(
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    depth_t = planar_to_radial_depth_torch(depth_t, K_t)
+
+                sky_mask_np = normalize_sky_mask(sample["semantic_segmentation"])
+                sky_mask_t = torch.from_numpy(sky_mask_np).to(
+                    device=device,
+                    dtype=torch.bool,
+                )
+
+                for aug_index, augmentation in enumerate(self.augmentation_specs):
+                    rng = self._rng_for(index, aug_index)
+                    model_name, model_cfg = self._resolve_augmented_model(
+                        augmentation
+                    )
+                    estimated_airlight = self._estimate_airlight_torch(
+                        rgb_t,
+                        sky_mask_t,
+                        sample_id=sample.get("id"),
+                        method=augmentation.airlight_method,
+                    )
+                    torch_gen = torch_generator_for_index(
+                        self.torch_device,
+                        self.seed,
+                        self.base_rng,
+                        index * 100_000 + aug_index,
+                    )
+                    foggy_t, beta, airlight_t, k_map_t, ls_map_t = (
+                        self._apply_model_torch(
+                            rgb_t,
+                            depth_t,
+                            model_name,
+                            model_cfg,
+                            rng,
+                            estimated_airlight,
+                            torch_gen,
+                        )
+                    )
+                    foggy_img = torch.clamp(foggy_t, 0.0, 1.0).cpu().numpy()
+                    airlight_np = airlight_t.detach().cpu().numpy()
+                    saved_paths.append(
+                        self._write_primary_output(
+                            sample,
+                            foggy_img,
+                            sample_id=sample["id"],
+                            model_name=model_name,
+                            beta=beta,
+                            airlight=airlight_np,
+                            full_id=sample.get("full_id"),
+                            augmentation=augmentation,
+                        )
+                    )
+                    if not self.output_backend.is_source_backed:
+                        self._write_model_config(model_name, model_cfg, saved_paths)
+
+                    if (
+                        SCATTERING_COEFFICIENT_SLOT in self.output_backends
+                        or ATMOSPHERIC_LIGHT_SLOT in self.output_backends
+                    ):
+                        self._write_auxiliary(
+                            sample,
+                            k_map=k_map_t.detach().cpu().numpy(),
+                            ls_map=ls_map_t.detach().cpu().numpy(),
+                            sample_id=sample["id"],
+                            model_name=model_name,
+                            full_id=sample.get("full_id"),
+                            beta=beta,
+                            airlight=airlight_np,
+                            augmentation=augmentation,
+                        )
+
+                if bar is not None:
+                    bar.update(1)
+
+        self._finalize_backends()
+        return saved_paths
+
     def _build_output_path(
         self,
         sample_id: str,
@@ -805,8 +1157,11 @@ class FogTransform(Transform):
         beta: float,
         airlight: np.ndarray,
         full_id: str | None = None,
+        augmentation_id: str | None = None,
     ) -> Path:
-        if self.suffix:
+        if augmentation_id is not None:
+            filename = f"{augmentation_id}.png"
+        elif self.suffix:
             filename = f"{sample_id}_{self.suffix}.png"
         else:
             beta_str = format_value(beta)
@@ -821,6 +1176,8 @@ class FogTransform(Transform):
             parts = [p for p in full_id.split("/") if p]
             if len(parts) > 1:
                 base = base.joinpath(*parts[:-1])
+        if augmentation_id is not None:
+            base = base / sample_id
         return base / filename
 
     def _write_model_config(
@@ -846,6 +1203,9 @@ class FogTransform(Transform):
         sample_id: str,
         model_name: str,
         full_id: str | None,
+        beta: float | None = None,
+        airlight: np.ndarray | None = None,
+        augmentation: FogAugmentationSpec | None = None,
     ) -> None:
         """Write the per-pixel β / L_s maps to their slots, if active."""
         scattering_backend = self.output_backends.get(SCATTERING_COEFFICIENT_SLOT)
@@ -857,6 +1217,9 @@ class FogTransform(Transform):
                 sample_id=sample_id,
                 model_name=model_name,
                 full_id=full_id,
+                beta=beta,
+                airlight=airlight,
+                augmentation=augmentation,
             )
         airlight_backend = self.output_backends.get(ATMOSPHERIC_LIGHT_SLOT)
         if airlight_backend is not None:
@@ -867,6 +1230,9 @@ class FogTransform(Transform):
                 sample_id=sample_id,
                 model_name=model_name,
                 full_id=full_id,
+                beta=beta,
+                airlight=airlight,
+                augmentation=augmentation,
             )
 
     def _write_aux_to_backend(
@@ -878,9 +1244,40 @@ class FogTransform(Transform):
         sample_id: str,
         model_name: str,
         full_id: str | None,
+        beta: float | None = None,
+        airlight: np.ndarray | None = None,
+        augmentation: FogAugmentationSpec | None = None,
     ) -> None:
         if backend.is_source_backed:
-            backend.write(sample, value)
+            if augmentation is None:
+                backend.write(sample, value)
+                return
+            output_full_id = self._augmentation_full_id(
+                sample,
+                augmentation.id,
+                backend,
+            )
+            output_basename = f"{augmentation.id}{backend.output_extension or '.npy'}"
+            attributes = (
+                self._augmentation_attributes(
+                    sample,
+                    augmentation,
+                    model_name=model_name,
+                    beta=float(beta) if beta is not None else float(np.mean(value)),
+                    airlight=(
+                        airlight
+                        if airlight is not None
+                        else np.asarray([np.nan, np.nan, np.nan], dtype=np.float32)
+                    ),
+                )
+            )
+            backend.write(
+                sample,
+                value,
+                output_full_id=output_full_id,
+                output_basename=output_basename,
+                attributes=attributes,
+            )
             return
         # Legacy disk fallback: mirror the RGB output's hierarchy but emit .npy.
         base = backend.root / model_name
@@ -888,6 +1285,11 @@ class FogTransform(Transform):
             parts = [p for p in full_id.split("/") if p]
             if len(parts) > 1:
                 base = base.joinpath(*parts[:-1])
+        if augmentation is not None:
+            base = base / sample_id
+            target = base / f"{augmentation.id}.npy"
+            backend.write(sample, value, default_path=target)
+            return
         target = base / f"{sample_id}.npy"
         backend.write(sample, value, default_path=target)
 

@@ -1,0 +1,16 @@
+{
+  "airlight": "from_sky",
+  "seed": 1337,
+  "depth_scale": 1.0,
+  "resize_depth": true,
+  "contrast_threshold": 0.05,
+  "device": "cpu",
+  "gpu_batch_size": 4,
+  "augmentations": {
+    "file_id_hierarchy_name": "file_id",
+    "attribute_key": "fog_augmentation",
+    "models": ["uniform"],
+    "visibility_m": [10, 20, 40, 70, 100],
+    "airlight_methods": ["from_sky"]
+  }
+}

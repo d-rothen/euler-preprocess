@@ -129,6 +129,21 @@ def _write_fog_config(path: Path, *, visibility_m: float = 200.0) -> Path:
     return path
 
 
+def _write_stepped_fog_config(path: Path) -> Path:
+    cfg = {
+        "airlight": "from_sky",
+        "device": "cpu",
+        "seed": 7,
+        "contrast_threshold": 0.05,
+        "augmentations": {
+            "visibility_m": [10.0, 20.0],
+            "atmospheric_light": [0.4, 0.5, 0.6],
+        },
+    }
+    path.write_text(json.dumps(cfg))
+    return path
+
+
 def _build_pipeline_config(
     pipeline_root: Path,
     manifest_path: Path,
@@ -241,6 +256,73 @@ def test_writes_scattering_and_airlight_maps(tmp_path: Path) -> None:
     assert raw_scattering.shape == (4, 6)
     raw_airlight = np.load(airlight_path)
     assert raw_airlight.shape == (3, 4, 6)
+
+
+def test_stepped_augmentations_write_file_id_layout_and_attributes(
+    tmp_path: Path,
+) -> None:
+    dataset = _make_dataset(tmp_path)
+    pipeline_root = tmp_path / "pipeline_root_stepped"
+    manifest_path = pipeline_root / ".euler_pipeline" / "pipeline_outputs.json"
+    config = _build_pipeline_config(
+        pipeline_root,
+        manifest_path,
+        include_scattering=True,
+        include_airlight=True,
+    )
+
+    backends = prepare_output_backends(config, dataset, FogTransform)
+    transform = FogTransform(
+        config_path=str(_write_stepped_fog_config(tmp_path / "fog_stepped.json")),
+        out_path=str(backends["rgb"].root),
+        output_backends=backends,
+    )
+
+    saved_paths = transform.run(dataset)
+
+    assert saved_paths == [
+        pipeline_root / "foggy_rgb" / "Scene01" / "Camera_0" / "00001" / "mor_10m.png",
+        pipeline_root / "foggy_rgb" / "Scene01" / "Camera_0" / "00001" / "mor_20m.png",
+    ]
+    for path in saved_paths:
+        assert path.exists()
+
+    scattering_path = (
+        pipeline_root
+        / "scattering"
+        / "Scene01"
+        / "Camera_0"
+        / "00001"
+        / "mor_10m.npy"
+    )
+    airlight_path = (
+        pipeline_root
+        / "airlight"
+        / "Scene01"
+        / "Camera_0"
+        / "00001"
+        / "mor_10m.npy"
+    )
+    assert scattering_path.exists()
+    assert airlight_path.exists()
+
+    k_map = load_map_2d(str(scattering_path))
+    expected_k = visibility_to_k(10.0, 0.05)
+    np.testing.assert_allclose(k_map, expected_k, atol=1e-6)
+
+    output_index = json.loads(
+        (pipeline_root / "foggy_rgb" / ".ds_crawler" / "output.json").read_text()
+    )
+    node = output_index["dataset"]["children"]["Scene01"]["children"]["Camera_0"]
+    file_id_node = node["children"]["00001"]
+    entries = {entry["id"]: entry for entry in file_id_node["files"]}
+    assert set(entries) == {"mor_10m", "mor_20m"}
+    attrs = entries["mor_10m"]["attributes"]["fog_augmentation"]
+    assert attrs["id"] == "mor_10m"
+    assert attrs["source_id"] == "00001"
+    assert attrs["meteorological_visibility_m"] == 10.0
+    assert attrs["model"] == "uniform"
+    np.testing.assert_allclose(attrs["atmospheric_light"], [0.4, 0.5, 0.6])
 
 
 def test_only_scattering_target_writes_only_scattering(tmp_path: Path) -> None:
@@ -463,3 +545,31 @@ def test_apply_model_returns_spatial_fields_for_heterogeneous() -> None:
     assert k_map.shape == (16, 16)
     # Spatially varying — there should be actual variance in the field.
     assert float(k_map.std()) > 0.0
+
+
+def test_apply_model_accepts_direct_scattering_coefficient() -> None:
+    """Stepped configs may specify beta directly instead of MOR/visibility."""
+    from euler_preprocess.fog.models import apply_model
+
+    rng = np.random.default_rng(0)
+    rgb = np.full((4, 5, 3), 0.5, dtype=np.float32)
+    depth = np.full((4, 5), 10.0, dtype=np.float32)
+    estimated = np.array([0.8, 0.8, 0.9], dtype=np.float32)
+    cfg = {
+        "scattering_coefficient": {"dist": "constant", "value": 0.123},
+        "visibility_m": {"dist": "constant", "value": 999.0},
+        "atmospheric_light": "from_sky",
+    }
+
+    _, k_mean, _, k_map, _ = apply_model(
+        rgb,
+        depth,
+        "uniform",
+        cfg,
+        rng,
+        contrast_threshold_default=0.05,
+        estimated_airlight=estimated,
+    )
+
+    assert k_mean == 0.123
+    np.testing.assert_allclose(k_map, 0.123)

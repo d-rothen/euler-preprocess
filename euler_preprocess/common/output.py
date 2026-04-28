@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import tempfile
-from collections.abc import Callable
+import zipfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -202,6 +203,131 @@ def _set_stream_name(stream: Any, basename: str) -> None:
         pass
 
 
+def _merge_top_level_mapping(target: dict[str, Any], overlay: dict[str, Any]) -> None:
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            target[key].update(value)
+        elif isinstance(value, dict):
+            target[key] = dict(value)
+        else:
+            target[key] = value
+
+
+def _patch_output_index(
+    dataset_writer: DatasetWriter | ZipDatasetWriter,
+    overrides: dict[str, Any],
+) -> None:
+    if not overrides:
+        return
+
+    if isinstance(dataset_writer, ZipDatasetWriter):
+        entry_name = ".ds_crawler/output.json"
+        archive_path = Path(dataset_writer.root)
+        replacement_name = archive_path.with_suffix(archive_path.suffix + ".tmp")
+        with zipfile.ZipFile(archive_path, "r") as source_zip:
+            with zipfile.ZipFile(replacement_name, "w") as target_zip:
+                replaced = False
+                for info in source_zip.infolist():
+                    data = source_zip.read(info.filename)
+                    if info.filename == entry_name and not replaced:
+                        payload = json.loads(data.decode("utf-8"))
+                        _merge_top_level_mapping(payload, overrides)
+                        data = json.dumps(payload, indent=2).encode("utf-8")
+                        replaced = True
+                    target_zip.writestr(info, data)
+        replacement_name.replace(archive_path)
+        return
+
+    output_path = Path(dataset_writer.root) / ".ds_crawler" / "output.json"
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    _merge_top_level_mapping(payload, overrides)
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _head_mapping(index_output: Mapping[str, Any]) -> dict[str, Any] | None:
+    head = index_output.get("head")
+    return head if isinstance(head, dict) else None
+
+
+def _modality_key(index_output: Mapping[str, Any]) -> str | None:
+    raw_type = index_output.get("type")
+    if isinstance(raw_type, str) and raw_type:
+        return raw_type
+    head = _head_mapping(index_output)
+    if head is None:
+        return None
+    modality = head.get("modality")
+    if isinstance(modality, dict):
+        key = modality.get("key")
+        if isinstance(key, str) and key:
+            return key
+    return None
+
+
+def _modality_meta(index_output: Mapping[str, Any]) -> dict[str, Any]:
+    meta = index_output.get("meta")
+    if isinstance(meta, dict):
+        return dict(meta)
+    head = _head_mapping(index_output)
+    modality = head.get("modality") if head else None
+    if isinstance(modality, dict) and isinstance(modality.get("meta"), dict):
+        return dict(modality["meta"])
+    return {}
+
+
+def _legacy_index_overrides(index_output: Mapping[str, Any]) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+
+    meta = index_output.get("meta")
+    if isinstance(meta, dict):
+        overrides["meta"] = dict(meta)
+
+    euler_train = index_output.get("euler_train")
+    if isinstance(euler_train, dict):
+        train_overlay = dict(euler_train)
+    else:
+        train_overlay = {}
+        head = _head_mapping(index_output)
+        addons = head.get("addons") if head else None
+        if isinstance(addons, dict) and isinstance(addons.get("euler_train"), dict):
+            train_overlay.update(addons["euler_train"])
+    modality_key = _modality_key(index_output)
+    if modality_key and "modality_type" not in train_overlay:
+        train_overlay["modality_type"] = modality_key
+    if train_overlay:
+        overrides["euler_train"] = train_overlay
+
+    return overrides
+
+
+def _set_head_meta(index_output: dict[str, Any], meta: dict[str, Any]) -> None:
+    head = index_output.get("head")
+    if not isinstance(head, dict):
+        return
+    new_head = json.loads(json.dumps(head))
+    new_head.setdefault("modality", {})
+    new_head["modality"]["meta"] = dict(meta)
+    index_output["head"] = new_head
+
+
+def _split_hierarchy_value(key: str, separator: str | None) -> str:
+    if separator and separator in key:
+        return key.split(separator, 1)[1]
+    return key
+
+
+def _relative_path_from_full_id(
+    full_id: str,
+    basename: str,
+    *,
+    separator: str | None,
+) -> str:
+    parts = [p for p in full_id.split("/") if p]
+    parent_parts = parts[:-1]
+    dir_parts = [_split_hierarchy_value(part, separator) for part in parent_parts]
+    return str(Path(*dir_parts) / basename) if dir_parts else basename
+
+
 class LegacyOutputBackend:
     """Legacy output backend used by direct transform invocation."""
 
@@ -217,7 +343,11 @@ class LegacyOutputBackend:
         value: Any,
         *,
         default_path: Path | None = None,
+        output_full_id: str | None = None,
+        output_basename: str | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> Path:
+        del output_full_id, output_basename, attributes
         if default_path is None:
             raise ValueError("default_path is required for legacy outputs")
 
@@ -255,6 +385,7 @@ class SourceBackedOutputBackend:
         output_extension: str | None = None,
         pipeline_manifest_path: Path | None = None,
         pipeline_manifest_targets: list[PipelineOutputTargetConfig] | None = None,
+        index_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.source_modality = source_modality
         self.root = root
@@ -264,6 +395,7 @@ class SourceBackedOutputBackend:
         self.output_extension = output_extension
         self.pipeline_manifest_path = pipeline_manifest_path
         self.pipeline_manifest_targets = pipeline_manifest_targets or []
+        self.index_overrides = index_overrides or {}
 
     def write(
         self,
@@ -271,11 +403,14 @@ class SourceBackedOutputBackend:
         value: Any,
         *,
         default_path: Path | None = None,
+        output_full_id: str | None = None,
+        output_basename: str | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> Path:
         del default_path
 
         sample_id = sample.get("id", "?")
-        full_id = str(sample.get("full_id") or f"/{sample_id}")
+        full_id = str(output_full_id or sample.get("full_id") or f"/{sample_id}")
         meta = sample.get("meta")
         if not isinstance(meta, dict):
             raise ValueError(
@@ -291,20 +426,35 @@ class SourceBackedOutputBackend:
             )
 
         source_path = Path(str(source_meta["path"]))
-        if self.output_extension is not None:
+        if output_basename is not None:
+            basename = output_basename
+            relative_path = _relative_path_from_full_id(
+                full_id,
+                basename,
+                separator=getattr(self.dataset_writer, "_separator", None),
+            )
+        elif self.output_extension is not None:
             basename = source_path.stem + self.output_extension
             relative_path = str(source_path.with_suffix(self.output_extension))
         else:
             basename = source_path.name
             relative_path = str(source_path)
         source_meta_copy = dict(source_meta)
+        source_attributes = source_meta_copy.get("attributes")
+        if isinstance(source_attributes, dict):
+            entry_attributes: dict[str, Any] | None = dict(source_attributes)
+        else:
+            entry_attributes = None
+        if attributes:
+            entry_attributes = {**(entry_attributes or {}), **attributes}
 
         if isinstance(self.dataset_writer, ZipDatasetWriter):
             if supports_stream_target(self.modality_writer):
                 with self.dataset_writer.open(
                     full_id,
                     basename,
-                    source_meta=source_meta_copy,
+                    source_entry=source_meta_copy,
+                    attributes=entry_attributes,
                 ) as stream:
                     _set_stream_name(stream, basename)
                     self.modality_writer(stream, value, self.modality_meta)
@@ -316,14 +466,16 @@ class SourceBackedOutputBackend:
                         full_id,
                         basename,
                         temp_path.read_bytes(),
-                        source_meta=source_meta_copy,
+                        source_entry=source_meta_copy,
+                        attributes=entry_attributes,
                     )
             return Path(f"{self.dataset_writer.root}::{relative_path}")
 
         target_path = self.dataset_writer.get_path(
             full_id,
             basename,
-            source_meta=source_meta_copy,
+            source_entry=source_meta_copy,
+            attributes=entry_attributes,
         )
         self.modality_writer(str(target_path), value, self.modality_meta)
         return target_path
@@ -335,6 +487,7 @@ class SourceBackedOutputBackend:
 
     def finalize(self) -> None:
         self.dataset_writer.save_index()
+        _patch_output_index(self.dataset_writer, self.index_overrides)
         if self.pipeline_manifest_path and self.pipeline_manifest_targets:
             _write_pipeline_outputs_manifest(
                 self.pipeline_manifest_path,
@@ -471,10 +624,11 @@ def prepare_output_backend(
     index_output = dataset.get_modality_index(source_modality)
     meta_overrides = getattr(transform_class, "OUTPUT_INDEX_META_OVERRIDES", None)
     if isinstance(meta_overrides, dict) and meta_overrides:
-        merged_meta = dict(index_output.get("meta") or {})
+        merged_meta = _modality_meta(index_output)
         merged_meta.update(meta_overrides)
         index_output = dict(index_output)
         index_output["meta"] = merged_meta
+        _set_head_meta(index_output, merged_meta)
 
     dataset_writer = create_dataset_writer_from_index(
         index_output=index_output,
@@ -495,9 +649,10 @@ def prepare_output_backend(
         root=root,
         dataset_writer=dataset_writer,
         modality_writer=modality_writer,
-        modality_meta=index_output.get("meta"),
+        modality_meta=_modality_meta(index_output),
         pipeline_manifest_path=pipeline_manifest_path,
         pipeline_manifest_targets=[pipeline_target] if pipeline_target else [],
+        index_overrides=_legacy_index_overrides(index_output),
     )
 
 
@@ -547,6 +702,7 @@ def _build_auxiliary_backend(
         output_extension=spec.output_extension,
         pipeline_manifest_path=None,
         pipeline_manifest_targets=[],
+        index_overrides=_legacy_index_overrides(index_output),
     )
 
 

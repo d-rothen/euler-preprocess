@@ -77,6 +77,37 @@ def visibility_to_k(visibility_m: float, contrast_threshold: float) -> float:
     return -math.log(contrast_threshold) / visibility_m
 
 
+def resolve_scattering_coefficient(
+    model_cfg: dict,
+    rng: np.random.Generator,
+    contrast_threshold_default: float,
+) -> tuple[float, float | None, float]:
+    """Resolve the mean scattering coefficient for a fog model.
+
+    The historic config expresses fog density as meteorological visibility
+    (MOR) and converts it to beta.  Stepped augmentation configs may provide
+    beta directly via ``scattering_coefficient`` or its alias ``beta``.
+
+    Returns ``(beta, visibility_m, contrast_threshold)``.  ``visibility_m`` is
+    ``None`` when beta was configured directly.
+    """
+
+    contrast_threshold = float(
+        sample_value(
+            model_cfg.get("contrast_threshold", contrast_threshold_default), rng
+        )
+    )
+    beta_spec = model_cfg.get("scattering_coefficient", model_cfg.get("beta"))
+    if beta_spec is not None:
+        beta = float(sample_value(beta_spec, rng))
+        if beta < 0:
+            raise ValueError(f"Scattering coefficient must be >= 0, got {beta}")
+        return beta, None, contrast_threshold
+
+    visibility = float(sample_value(model_cfg.get("visibility_m"), rng))
+    return visibility_to_k(visibility, contrast_threshold), visibility, contrast_threshold
+
+
 def normalize_atmospheric_light(value: np.ndarray) -> np.ndarray:
     value = np.asarray(value, dtype=np.float32)
     if value.ndim == 0:
@@ -292,13 +323,11 @@ def apply_model(
     """
     if model_name not in DEFAULT_MODEL_CONFIGS:
         raise ValueError(f"Unsupported fog model: {model_name}")
-    visibility = float(sample_value(model_cfg.get("visibility_m"), rng))
-    contrast_threshold = float(
-        sample_value(
-            model_cfg.get("contrast_threshold", contrast_threshold_default), rng
-        )
+    k_mean, _visibility, _contrast_threshold = resolve_scattering_coefficient(
+        model_cfg,
+        rng,
+        contrast_threshold_default,
     )
-    k_mean = visibility_to_k(visibility, contrast_threshold)
 
     al_spec = model_cfg.get("atmospheric_light", "from_sky")
     if uses_estimated_airlight(al_spec):
