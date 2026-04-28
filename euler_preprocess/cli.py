@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.logging import get_logger, log_dataset_info
@@ -25,6 +27,132 @@ def _resolve(path_str: str, config_dir: Path) -> Path:
     if p.is_absolute():
         return p
     return (config_dir / p).resolve()
+
+
+class _SelectedSamples(Sequence):
+    """Lazy view over selected euler-loading dataset entries."""
+
+    def __init__(self, dataset, indices: Iterable[int]) -> None:
+        self.dataset = dataset
+        self.indices = tuple(indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __iter__(self) -> Iterator[dict]:
+        for index in self.indices:
+            yield self.dataset[index]
+
+    def __getitem__(self, index: int | slice):
+        if isinstance(index, slice):
+            return [self.dataset[i] for i in self.indices[index]]
+        return self.dataset[self.indices[index]]
+
+
+def _validate_sample_index(value: Any, *, key: str, dataset_size: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a non-negative integer index")
+    if value < 0:
+        raise ValueError(f"{key} must be a non-negative integer index")
+    if value >= dataset_size:
+        raise IndexError(
+            f"{key} {value} out of range for dataset of length {dataset_size}"
+        )
+    return value
+
+
+def _positive_int(value: Any, *, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: Any, *, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be a non-negative integer")
+    if value < 0:
+        raise ValueError(f"{key} must be a non-negative integer")
+    return value
+
+
+def _resolve_sample_indices(selection: Any, *, dataset_size: int) -> tuple[int, ...]:
+    if isinstance(selection, list):
+        indices = tuple(
+            _validate_sample_index(value, key="samples[]", dataset_size=dataset_size)
+            for value in selection
+        )
+        if not indices:
+            raise ValueError("samples must select at least one dataset entry")
+        return indices
+
+    if not isinstance(selection, dict):
+        raise ValueError("samples must be an object or a list of integer indices")
+
+    allowed = {"start", "stop", "step", "count"}
+    unknown = sorted(set(selection) - allowed)
+    if unknown:
+        raise ValueError(f"samples contains unknown keys: {', '.join(unknown)}")
+
+    start = _non_negative_int(selection.get("start", 0), key="samples.start")
+    stop_value = selection.get("stop")
+    if stop_value is None:
+        stop = dataset_size
+    else:
+        stop = _non_negative_int(stop_value, key="samples.stop")
+    step = _positive_int(selection.get("step", 1), key="samples.step")
+
+    if start >= dataset_size:
+        raise IndexError(
+            f"samples.start {start} out of range for dataset of length {dataset_size}"
+        )
+
+    indices = tuple(range(start, min(stop, dataset_size), step))
+    if "count" in selection:
+        count = _positive_int(selection["count"], key="samples.count")
+        indices = indices[:count]
+
+    if not indices:
+        raise ValueError("samples must select at least one dataset entry")
+    return indices
+
+
+def _select_configured_samples(config: dict, dataset, logger):
+    """Apply optional top-level sample selection from the dataset config."""
+    has_sample = "sample" in config
+    has_samples = "samples" in config
+    if has_sample and has_samples:
+        raise ValueError("Use either sample or samples, not both")
+    if not has_sample and not has_samples:
+        return dataset
+
+    dataset_size = len(dataset)
+    if has_sample:
+        sample_index = _validate_sample_index(
+            config["sample"],
+            key="sample",
+            dataset_size=dataset_size,
+        )
+        sample = dataset[sample_index]
+        logger.info(
+            "Sample selection: using sample=%d of %d (id=%s, full_id=%s)",
+            sample_index,
+            dataset_size,
+            sample.get("id"),
+            sample.get("full_id"),
+        )
+        return [sample]
+
+    indices = _resolve_sample_indices(config["samples"], dataset_size=dataset_size)
+    logger.info(
+        "Sample selection: using %d/%d samples (first_index=%d, last_index=%d)",
+        len(indices),
+        dataset_size,
+        indices[0],
+        indices[-1],
+    )
+    return _SelectedSamples(dataset, indices)
 
 
 def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
@@ -57,6 +185,7 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
     dataset = build_dataset(config, required_modalities, required_hierarchical)
     output_backends = prepare_output_backends(config, dataset, transform_class)
     primary_backend = next(iter(output_backends.values()))
+    samples = _select_configured_samples(config, dataset, logger)
     dataset_name = config.get("dataset", "dataset")
 
     raw_modalities = {
@@ -69,7 +198,7 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
             modality_info[name] = {"path": entry}
         else:
             modality_info[name] = entry
-    log_dataset_info(logger, dataset_name, len(dataset), modality_info, use_gpu)
+    log_dataset_info(logger, dataset_name, len(samples), modality_info, use_gpu)
     for slot, backend in output_backends.items():
         logger.info("Output path [%s]: %s", slot, backend.root)
 
@@ -98,7 +227,7 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         )
     transform = transform_class(**transform_kwargs)
 
-    saved_paths = transform.run(dataset)
+    saved_paths = transform.run(samples)
 
     logger.info("Transform complete. Generated %d outputs.", len(saved_paths))
     return 0

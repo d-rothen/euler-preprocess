@@ -35,6 +35,7 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
   "transform_config_path": "configs/run1.json",
   "output_path": "/path/to/output",
   "output_slot": "rgb",
+  "sample": 42,
   "modalities": {
     "rgb": {"path": "/path/to/rgb", "split": "train"},
     "depth": "/path/to/depth",
@@ -64,6 +65,8 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 | `transform_config_path` | Path to the transform-specific config (see below). `fog_config_path` is also accepted for backward compatibility. |
 | `output_path` | Output root used when no pipeline target overrides it. Optional if `pipeline.output_root` or `pipeline.output_targets[].path` supplies the destination. |
 | `output_slot` | Optional slot selector when `pipeline.output_targets` contains multiple entries. Defaults to `rgb` for `fog`, `depth` for `sky-depth`, and `depth` for `radial`. |
+| `sample` | Optional 0-based euler-loading dataset index. When set, only `dataset[sample]` is transformed, which is useful for small augmented benchmark slices from large datasets. |
+| `samples` | Optional multi-sample selector. Use a list of 0-based indices (`[0, 10, 20]`) or a slice object such as `{"start": 0, "stop": 1000, "step": 2, "count": 100}`. `stop` is exclusive; `count` caps the selected indices after slicing. Do not set both `sample` and `samples`. |
 | `modalities` | Regular modalities that participate in sample-ID intersection. Each value is either a plain path string or an object with a `path` key and an optional `split` key (see below). Which modalities are required depends on the transform (see table below). |
 | `hierarchical_modalities` | Per-scene data (e.g. intrinsics). Same format as `modalities`. Loaded once per scene and cached. |
 | `pipeline` | Optional runtime routing block compatible with `euler-inference` (`output_root`, `outputs_manifest_path`, `output_targets`). |
@@ -71,6 +74,11 @@ Every subcommand takes a **dataset config** JSON that points to the input data a
 #### Inline splits
 
 When a modality directory contains [ds-crawler](https://github.com/d-rothen/ds-crawler) split files (`.ds_crawler/split_<name>.json`), you can select a subset of the data by setting the `split` key on that modality. Sample IDs are matched by intersection across all modalities, so specifying a split on a single modality is sufficient to restrict the entire dataset.
+
+For quick slices after euler-loading has matched modalities, set `samples`.
+For example, `{"samples": {"step": 2}}` processes every second matched sample,
+and `{"samples": {"start": 10, "step": 5, "count": 20}}` processes 20 samples
+starting at index 10 with stride 5.
 
 **Required modalities per transform:**
 
