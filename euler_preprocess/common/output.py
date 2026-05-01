@@ -447,13 +447,22 @@ class SourceBackedOutputBackend:
             entry_attributes = None
         if attributes:
             entry_attributes = {**(entry_attributes or {}), **attributes}
+        source_entry_for_writer = dict(source_meta_copy)
+        if output_full_id is not None or output_basename is not None:
+            # The caller is intentionally writing a new logical layout
+            # (e.g. source sample -> augmentation).  Let DatasetWriter derive
+            # properties from the new full_id/basename instead of copying the
+            # source file's old path and basename captures.
+            source_entry_for_writer.pop("path_properties", None)
+            source_entry_for_writer.pop("basename_properties", None)
+            source_entry_for_writer.pop("attributes", None)
 
         if isinstance(self.dataset_writer, ZipDatasetWriter):
             if supports_stream_target(self.modality_writer):
                 with self.dataset_writer.open(
                     full_id,
                     basename,
-                    source_entry=source_meta_copy,
+                    source_entry=source_entry_for_writer,
                     attributes=entry_attributes,
                 ) as stream:
                     _set_stream_name(stream, basename)
@@ -466,7 +475,7 @@ class SourceBackedOutputBackend:
                         full_id,
                         basename,
                         temp_path.read_bytes(),
-                        source_entry=source_meta_copy,
+                        source_entry=source_entry_for_writer,
                         attributes=entry_attributes,
                     )
             return Path(f"{self.dataset_writer.root}::{relative_path}")
@@ -474,11 +483,24 @@ class SourceBackedOutputBackend:
         target_path = self.dataset_writer.get_path(
             full_id,
             basename,
-            source_entry=source_meta_copy,
+            source_entry=source_entry_for_writer,
             attributes=entry_attributes,
         )
         self.modality_writer(str(target_path), value, self.modality_meta)
         return target_path
+
+    def set_hierarchy_separator(self, separator: str) -> None:
+        """Set the writer hierarchy separator used for future entries."""
+        setattr(self.dataset_writer, "_separator", separator)
+
+    def add_head_addon(self, name: str, payload: dict[str, Any]) -> None:
+        """Add a dataset-head addon before the writer saves its artifacts."""
+        head = getattr(self.dataset_writer, "_dataset_head", None)
+        addons = getattr(head, "addons", None)
+        if not isinstance(addons, dict):
+            raise RuntimeError("Unsupported dataset writer head object")
+        addons[name] = dict(payload)
+        self.index_overrides[name] = dict(payload)
 
     def write_json(self, path: Path, data: dict[str, Any]) -> None:
         raise RuntimeError(

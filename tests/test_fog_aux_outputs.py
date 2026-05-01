@@ -314,15 +314,29 @@ def test_stepped_augmentations_write_file_id_layout_and_attributes(
         (pipeline_root / "foggy_rgb" / ".ds_crawler" / "output.json").read_text()
     )
     node = output_index["dataset"]["children"]["Scene01"]["children"]["Camera_0"]
-    file_id_node = node["children"]["00001"]
+    file_id_node = node["children"]["file_id:00001"]
     entries = {entry["id"]: entry for entry in file_id_node["files"]}
     assert set(entries) == {"mor_10m", "mor_20m"}
+    assert entries["mor_10m"]["path_properties"]["file_id"] == "00001"
+    assert entries["mor_10m"]["basename_properties"]["ext"] == "png"
     attrs = entries["mor_10m"]["attributes"]["fog_augmentation"]
     assert attrs["id"] == "mor_10m"
     assert attrs["source_id"] == "00001"
     assert attrs["meteorological_visibility_m"] == 10.0
     assert attrs["model"] == "uniform"
     np.testing.assert_allclose(attrs["atmospheric_light"], [0.4, 0.5, 0.6])
+    assert output_index["euler_layout"]["sample_axis"] == {
+        "name": "file_id",
+        "location": "hierarchy",
+    }
+    assert output_index["euler_layout"]["variant_axis"] == {
+        "name": "fog_augmentation",
+        "location": "file_id",
+    }
+    output_head = json.loads(
+        (pipeline_root / "foggy_rgb" / ".ds_crawler" / "dataset-head.json").read_text()
+    )
+    assert output_head["addons"]["euler_layout"] == output_index["euler_layout"]
 
 
 def test_only_scattering_target_writes_only_scattering(tmp_path: Path) -> None:

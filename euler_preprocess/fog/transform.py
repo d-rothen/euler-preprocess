@@ -51,6 +51,33 @@ from euler_loading.loaders.cpu.generic import (
     write_map_3d as _write_map_3d,
 )
 
+try:
+    from ds_crawler import EULER_LAYOUT_ADDON, build_layout_addon
+except ImportError:  # pragma: no cover - compatibility with older ds-crawler
+    EULER_LAYOUT_ADDON = "euler_layout"
+
+    def build_layout_addon(**kwargs):
+        payload: dict[str, Any] = {
+            "version": kwargs.get("version", "1.0"),
+            "sample_axis": {
+                "name": kwargs["sample_axis_name"],
+                "location": kwargs["sample_axis_location"],
+            },
+        }
+        family = kwargs.get("family")
+        if family is not None:
+            payload["family"] = family
+        variant_axis_name = kwargs.get("variant_axis_name")
+        if variant_axis_name is not None:
+            payload["variant_axis"] = {
+                "name": variant_axis_name,
+                "location": kwargs.get("variant_axis_location", "file_id"),
+            }
+        derived_from = kwargs.get("derived_from")
+        if derived_from is not None:
+            payload["derived_from"] = dict(derived_from)
+        return payload
+
 
 SCATTERING_COEFFICIENT_SLOT = "scattering_coefficient"
 ATMOSPHERIC_LIGHT_SLOT = "atmospheric_light"
@@ -174,6 +201,7 @@ class FogTransform(Transform):
             self.config
         )
         self.augmentation_specs = list(self.augmentation_config.specs)
+        self._configure_output_layout_metadata()
         self._written_configs: set[str] = set()
         self.torch_device = None
         self.use_gpu = False
@@ -374,9 +402,57 @@ class FogTransform(Transform):
                     return suffix
         return ".png"
 
+    def _layout_family(self) -> str | None:
+        raw = self.config.get("dataset_family")
+        return raw if isinstance(raw, str) and raw else None
+
+    def _augmentation_hierarchy_separator(self, backend: Any) -> str:
+        separator = getattr(getattr(backend, "dataset_writer", None), "_separator", None)
+        if isinstance(separator, str) and separator and separator != "+":
+            return separator
+        return ":"
+
+    def _configure_output_layout_metadata(self) -> None:
+        """Declare fog outputs as variants grouped by source sample id."""
+        if not self.augmentation_specs:
+            return
+
+        sample_axis_name = self.augmentation_config.file_id_hierarchy_name
+        if not sample_axis_name:
+            return
+
+        for backend in self.output_backends.values():
+            if not getattr(backend, "is_source_backed", False):
+                continue
+
+            separator = self._augmentation_hierarchy_separator(backend)
+            set_separator = getattr(backend, "set_hierarchy_separator", None)
+            if callable(set_separator):
+                set_separator(separator)
+
+            layout = build_layout_addon(
+                family=self._layout_family(),
+                sample_axis_name=sample_axis_name,
+                sample_axis_location="hierarchy",
+                variant_axis_name=self.augmentation_config.attribute_key,
+                variant_axis_location="file_id",
+                derived_from={
+                    "source_modality": getattr(backend, "source_modality", "rgb"),
+                    "source_id_attribute": (
+                        f"{self.augmentation_config.attribute_key}.source_id"
+                    ),
+                    "source_full_id_attribute": (
+                        f"{self.augmentation_config.attribute_key}.source_full_id"
+                    ),
+                },
+            )
+            add_head_addon = getattr(backend, "add_head_addon", None)
+            if callable(add_head_addon):
+                add_head_addon(EULER_LAYOUT_ADDON, layout)
+
     def _file_id_hierarchy_key(self, sample_id: str, backend: Any) -> str:
         name = self.augmentation_config.file_id_hierarchy_name
-        separator = getattr(getattr(backend, "dataset_writer", None), "_separator", None)
+        separator = self._augmentation_hierarchy_separator(backend)
         if name and separator:
             return f"{name}{separator}{sample_id}"
         return sample_id
