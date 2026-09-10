@@ -1,0 +1,262 @@
+{
+  "modalities": {
+    "depth": "../source/depth",
+    "ray_map": "../source/ray_map",
+    "rgb": "../source/rgb",
+    "valid_mask": "../source/valid_mask"
+  },
+  "hierarchical_modalities": {
+    "intrinsics": "../source/intrinsics"
+  },
+  "preprocessing": {
+    "resize": [
+      384,
+      768
+    ],
+    "crop": {
+      "size": [
+        320,
+        640
+      ],
+      "anchor": "center"
+    },
+    "reference_field": "rgb",
+    "infer_fields": false,
+    "fields": {
+      "rgb": {
+        "kind": "image",
+        "layout": "HWC"
+      },
+      "depth": {
+        "kind": "depth",
+        "layout": "HW"
+      },
+      "valid_mask": {
+        "kind": "mask",
+        "layout": "HW"
+      },
+      "ray_map": {
+        "kind": "ray_map",
+        "layout": "HWC"
+      },
+      "intrinsics": {
+        "kind": "intrinsics",
+        "layout": "matrix",
+        "reduce": "first"
+      }
+    }
+  },
+  "bindings": {
+    "fields": {
+      "depth": {
+        "policy": {
+          "interpolation": "bilinear",
+          "invalid_depth": "legacy_blend",
+          "mask_threshold": 0.5,
+          "rays": "preserve"
+        },
+        "profile": {
+          "depth_kind": "planar_z",
+          "dtype": "float32",
+          "frame": "camera_0_optical",
+          "image_plane": "camera_0",
+          "invalid": {
+            "non_finite": false,
+            "sentinel": 0
+          },
+          "kind": "depth",
+          "layout": "HW",
+          "shape": [
+            480,
+            960
+          ],
+          "unit": "meter"
+        },
+        "source": "source_depth"
+      },
+      "intrinsics": {
+        "calibration": {
+          "applies_to": [
+            "rgb",
+            "depth",
+            "valid_mask",
+            "ray_map"
+          ],
+          "camera_model": "pinhole",
+          "frame": "camera_0_optical",
+          "full_id": "/scene_01/camera_0/calibration",
+          "image_plane": "camera_0",
+          "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "policy": {
+          "interpolation": "bilinear",
+          "invalid_depth": "legacy_blend",
+          "mask_threshold": 0.5,
+          "rays": "preserve"
+        },
+        "profile": {
+          "camera_model": "pinhole",
+          "dtype": "float32",
+          "frame": "camera_0_optical",
+          "image_plane": "camera_0",
+          "invalid": {
+            "non_finite": false,
+            "sentinel": null
+          },
+          "kind": "intrinsics",
+          "layout": "matrix",
+          "shape": [
+            3,
+            3
+          ],
+          "unit": "pixel"
+        },
+        "selection": "calibration",
+        "source": "source_intrinsics"
+      },
+      "ray_map": {
+        "policy": {
+          "interpolation": "bilinear",
+          "invalid_depth": "legacy_blend",
+          "mask_threshold": 0.5,
+          "rays": "resample_normalize"
+        },
+        "profile": {
+          "components": [
+            "x",
+            "y",
+            "z"
+          ],
+          "dtype": "float32",
+          "frame": "camera_0_optical",
+          "image_plane": "camera_0",
+          "invalid": {
+            "non_finite": false,
+            "sentinel": null
+          },
+          "kind": "ray_map",
+          "layout": "HWC",
+          "normalization": "homogeneous",
+          "shape": [
+            480,
+            960,
+            3
+          ],
+          "unit": "dimensionless"
+        },
+        "source": "source_ray_map"
+      },
+      "rgb": {
+        "policy": {
+          "interpolation": "bilinear",
+          "invalid_depth": "legacy_blend",
+          "mask_threshold": 0.5,
+          "rays": "preserve"
+        },
+        "profile": {
+          "dtype": "float32",
+          "image_plane": "camera_0",
+          "invalid": {
+            "non_finite": false,
+            "sentinel": null
+          },
+          "kind": "image",
+          "layout": "HWC",
+          "shape": [
+            480,
+            960,
+            3
+          ],
+          "unit": "dimensionless"
+        },
+        "source": "source_rgb"
+      },
+      "valid_mask": {
+        "policy": {
+          "interpolation": "nearest",
+          "invalid_depth": "legacy_blend",
+          "mask_threshold": 0.5,
+          "rays": "preserve"
+        },
+        "profile": {
+          "dtype": "bool",
+          "image_plane": "camera_0",
+          "invalid": {
+            "non_finite": false,
+            "sentinel": null
+          },
+          "kind": "mask",
+          "layout": "HW",
+          "meaning": "true denotes valid source depth",
+          "shape": [
+            480,
+            960
+          ],
+          "unit": "dimensionless"
+        },
+        "source": "source_valid_mask"
+      }
+    },
+    "image_planes": {
+      "camera_0": {
+        "camera_model": "pinhole",
+        "frame": "camera_0_optical",
+        "size": [
+          480,
+          960
+        ]
+      }
+    },
+    "revisions": {
+      "source_depth": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_intrinsics": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_ray_map": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_rgb": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_valid_mask": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "backend": "torch_cpu"
+  },
+  "outputs": {
+    "depth": {
+      "path": "../output/depth",
+      "dataset_id": "cropped_depth",
+      "revision": "export_v1",
+      "encoding": {
+        "id": "npy"
+      }
+    },
+    "intrinsics": {
+      "path": "../output/intrinsics",
+      "dataset_id": "cropped_intrinsics",
+      "revision": "export_v1",
+      "encoding": {
+        "id": "npy"
+      }
+    },
+    "ray_map": {
+      "path": "../output/ray_map",
+      "dataset_id": "cropped_ray_map",
+      "revision": "export_v1",
+      "encoding": {
+        "id": "npy"
+      }
+    },
+    "rgb": {
+      "path": "../output/rgb",
+      "dataset_id": "cropped_rgb",
+      "revision": "export_v1",
+      "encoding": {
+        "id": "npy"
+      }
+    },
+    "valid_mask": {
+      "path": "../output/valid_mask",
+      "dataset_id": "cropped_valid_mask",
+      "revision": "export_v1",
+      "encoding": {
+        "id": "npy"
+      }
+    }
+  },
+  "receipt_sidecars": true
+}

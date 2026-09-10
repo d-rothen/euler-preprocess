@@ -244,6 +244,23 @@ def _cmd_radial(args: argparse.Namespace) -> int:
     return _run_transform(args, RadialTransform)
 
 
+def _cmd_spatial(args: argparse.Namespace) -> int:
+    from euler_preprocess.spatial import export_spatial
+
+    config_path = Path(args.config).resolve()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for group in ("modalities", "hierarchical_modalities"):
+        for key, entry in config.get(group, {}).items():
+            if isinstance(entry, str):
+                config[group][key] = str(_resolve(entry, config_path.parent))
+            else:
+                entry["path"] = str(_resolve(entry["path"], config_path.parent))
+    for entry in config["outputs"].values():
+        entry["path"] = str(_resolve(entry["path"], config_path.parent))
+    export_spatial(config)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Preprocessing transforms for RGB+depth datasets.",
@@ -280,6 +297,11 @@ def parse_args() -> argparse.Namespace:
         help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
     )
     radial_parser.set_defaults(func=_cmd_radial)
+
+    spatial_parser = subparsers.add_parser(
+        "spatial", parents=[common], help="Export deterministic crop/resize with verified execution receipts.",
+    )
+    spatial_parser.set_defaults(func=_cmd_spatial)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

@@ -668,3 +668,5 @@ Standalone `RadialTransform(...)` usage keeps the legacy `.npy` output behaviour
 ## License
 
 [MIT](LICENSE) © Daniel Rothenpieler
+
+See [Phase 2 spatial](docs/spatial.md) for the opt-in captured spatial workflow (3.14.0, unreleased).

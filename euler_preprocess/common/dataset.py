@@ -6,7 +6,21 @@ def _make_modality(entry: str | dict):
 
     if isinstance(entry, str):
         return Modality(entry)
-    return Modality(entry["path"], split=entry.get("split"))
+    return Modality(
+        entry["path"],
+        **{
+            key: entry[key]
+            for key in (
+                "split",
+                "metadata_scope",
+                "collapse_single",
+                "cache",
+                "applies_to",
+                "hierarchy_scope",
+            )
+            if key in entry
+        },
+    )
 
 
 def build_dataset(
@@ -24,7 +38,7 @@ def build_dataset(
     boolean sky masks vs. a ``class_segmentation`` index for raw class
     id maps).
     """
-    from euler_loading import MultiModalDataset
+    from euler_loading import MultiModalDataset, SamplePreprocessor
 
     raw_modalities = config.get("modalities", {})
     raw_hierarchical = config.get("hierarchical_modalities", {})
@@ -53,4 +67,7 @@ def build_dataset(
     return MultiModalDataset(
         modalities=modalities,
         hierarchical_modalities=hierarchical_modalities or None,
+        transforms=[SamplePreprocessor.from_config(config["preprocessing"])]
+        if config.get("preprocessing")
+        else None,
     )

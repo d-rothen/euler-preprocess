@@ -8,18 +8,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ds_crawler import DatasetWriter, ZipDatasetWriter
+from ds_crawler import DatasetWriter, ValidatedDatasetWriter, ZipDatasetWriter
 from ds_crawler.zip_utils import (
     METADATA_DIR,
-    OUTPUT_FILENAME as DS_CRAWLER_INDEX_FILENAME,
     get_metadata_entry_name,
+)
+from ds_crawler.zip_utils import (
+    OUTPUT_FILENAME as DS_CRAWLER_INDEX_FILENAME,
 )
 from euler_loading import MultiModalDataset
 from euler_loading.dataset import create_dataset_writer_from_index
 from euler_loading.loaders._writer_utils import supports_stream_target
 
 from euler_preprocess.common.io import OutputWriter
-
 
 PIPELINE_OUTPUTS_MANIFEST_VERSION = 1
 _PIPELINE_OUTPUT_STORAGE_KINDS = {"directory", "zip", "file"}
@@ -420,8 +421,31 @@ class SourceBackedOutputBackend:
         output_full_id: str | None = None,
         output_basename: str | None = None,
         attributes: dict[str, Any] | None = None,
+        variant_id: str | None = None,
+        sidecar: bool = False,
     ) -> Path:
         del default_path
+
+        if isinstance(self.dataset_writer, ValidatedDatasetWriter):
+            from euler_loading import write_materialized
+
+            provenance = sample.get("provenance")
+            if variant_id is not None and (
+                not provenance or provenance["variant_id"] != variant_id
+            ):
+                raise ValueError("output variant disagrees with captured execution")
+            source_attrs = dict(
+                sample.get("attributes", {}).get(self.source_modality, {})
+            )
+            source_attrs.pop("euler_transforms", None)
+            source_attrs.pop("output_encoding", None)
+            source_attrs.update(attributes or {})
+            return Path(write_materialized(
+                self.dataset_writer, value, provenance,
+                output_full_id=output_full_id or sample["full_id"],
+                output_basename=output_basename,
+                attributes=source_attrs, sidecar=sidecar,
+            ))
 
         sample_id = sample.get("id", "?")
         full_id = str(output_full_id or sample.get("full_id") or f"/{sample_id}")
@@ -505,15 +529,11 @@ class SourceBackedOutputBackend:
 
     def set_hierarchy_separator(self, separator: str) -> None:
         """Set the writer hierarchy separator used for future entries."""
-        setattr(self.dataset_writer, "_separator", separator)
+        self.dataset_writer.set_hierarchy_separator(separator)
 
     def add_head_addon(self, name: str, payload: dict[str, Any]) -> None:
         """Add a dataset-head addon before the writer saves its artifacts."""
-        head = getattr(self.dataset_writer, "_dataset_head", None)
-        addons = getattr(head, "addons", None)
-        if not isinstance(addons, dict):
-            raise RuntimeError("Unsupported dataset writer head object")
-        addons[name] = dict(payload)
+        self.dataset_writer.set_head_addon(name, payload)
         self.index_overrides[name] = dict(payload)
 
     def write_json(self, path: Path, data: dict[str, Any]) -> None:
@@ -522,17 +542,13 @@ class SourceBackedOutputBackend:
         )
 
     def finalize(self) -> None:
-        self.dataset_writer.save_index(filename=DS_CRAWLER_INDEX_FILENAME)
-        _patch_output_index(
-            self.dataset_writer,
-            self.index_overrides,
-            filename=DS_CRAWLER_INDEX_FILENAME,
-        )
+        if isinstance(self.dataset_writer, ValidatedDatasetWriter):
+            self.dataset_writer.finalize()
+        else:
+            self.dataset_writer.save_index(filename=DS_CRAWLER_INDEX_FILENAME)
+            _patch_output_index(self.dataset_writer, self.index_overrides, filename=DS_CRAWLER_INDEX_FILENAME)
         if self.pipeline_manifest_path and self.pipeline_manifest_targets:
-            _write_pipeline_outputs_manifest(
-                self.pipeline_manifest_path,
-                self.pipeline_manifest_targets,
-            )
+            _write_pipeline_outputs_manifest(self.pipeline_manifest_path, self.pipeline_manifest_targets)
 
 
 def _resolve_output_slot(
@@ -643,6 +659,10 @@ def prepare_output_backend(
         raise ValueError(
             f"{transform_class.__name__} does not declare SOURCE_MODALITY"
         )
+
+    materialized = config.get("materialization_outputs", {}).get(source_modality)
+    if materialized is not None:
+        return prepare_materialized_backend(dataset, source_modality, materialized)
 
     pipeline = parse_pipeline_config(config)
     pipeline_target = _select_pipeline_target(config, pipeline, transform_class)
@@ -834,6 +854,12 @@ def prepare_output_backends(
     ``OUTPUT_SLOTS`` order.
     """
 
+    if config.get("materialization_outputs"):
+        return {
+            field: prepare_materialized_backend(dataset, field, options)
+            for field, options in config["materialization_outputs"].items()
+        }
+
     primary_slot = _resolve_primary_slot(transform_class)
     primary_backend = prepare_output_backend(config, dataset, transform_class)
     backends: dict[str, SourceBackedOutputBackend] = {primary_slot: primary_backend}
@@ -859,11 +885,7 @@ def prepare_output_backends(
 
     # Aggregate every slot we actually wrote into the manifest the primary
     # backend will emit, so a single manifest documents the full set.
-    if (
-        pipeline is not None
-        and pipeline.outputs_manifest_path
-        and len(backends) > 1
-    ):
+    if pipeline is not None and pipeline.outputs_manifest_path and len(backends) > 1:
         manifest_targets: list[PipelineOutputTargetConfig] = list(
             primary_backend.pipeline_manifest_targets
         )
@@ -876,3 +898,29 @@ def prepare_output_backends(
         primary_backend.pipeline_manifest_targets = manifest_targets
 
     return backends
+
+
+def prepare_materialized_backend(dataset, field, options):
+    """Explicit bound-output slot. Arbitrary producer changes fail receipt checks."""
+    from euler_loading import output_encoding
+
+    codec_config = options.get("encoding", {"id": "npy"})
+    codec = output_encoding(codec_config["id"], scale=codec_config.get("scale"))
+    writer = dataset.create_output_writer(
+        field,
+        options["path"],
+        derivation=options["derivation"],
+        dataset_id=options["dataset_id"],
+        revision=options["revision"],
+        encoding=codec,
+        expected_full_ids=options.get("expected_full_ids"),
+        metadata_scope=options.get("metadata_scope"),
+        resume=options.get("resume", False),
+    )
+    return SourceBackedOutputBackend(
+        source_modality=field,
+        root=Path(options["path"]),
+        dataset_writer=writer,
+        modality_writer=None,
+        modality_meta=None,
+    )
