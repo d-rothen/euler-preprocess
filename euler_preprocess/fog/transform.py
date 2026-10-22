@@ -286,8 +286,9 @@ class FogTransform(Transform):
         "depth":                    np.ndarray (H, W), float in meters
         "semantic_segmentation":    np.ndarray (H, W), boolean sky mask
         "id":         str
-        "intrinsics": dict -- hierarchical modality containing ``"intrinsics"``
-                      key mapping to a (3, 3) camera intrinsics matrix *K*.
+        "intrinsics": (3, 3) camera intrinsics matrix *K* (per-sample
+                      modality), or a dict with an ``"intrinsics"`` key
+                      mapping to *K* (hierarchical modality).
                       When present, planar (z-buffer) depth is converted to
                       radial (Euclidean) depth before fog is applied.
 

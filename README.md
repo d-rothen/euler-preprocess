@@ -74,9 +74,7 @@ loader.
   "modalities": {
     "rgb": {"path": "/path/to/rgb", "split": "train"},
     "depth": "/path/to/depth",
-    "semantic_segmentation": "/path/to/classSegmentation"
-  },
-  "hierarchical_modalities": {
+    "semantic_segmentation": "/path/to/classSegmentation",
     "intrinsics": {"path": "/path/to/intrinsics"}
   }
 }
@@ -89,17 +87,27 @@ loader.
 | `output_slot` | Optional slot selector when `pipeline.output_targets` has several entries. Defaults to `rgb` for `fog` and `depth` for `sky-depth` / `radial`. |
 | `sample` | Optional 0-based dataset index. Only `dataset[sample]` is transformed — useful for small benchmark slices of large datasets. |
 | `samples` | Optional multi-sample selector: a list of indices (`[0, 10, 20]`) or a slice object (`{"start": 0, "stop": 1000, "step": 2, "count": 100}`). `stop` is exclusive, `count` caps the result. Mutually exclusive with `sample`. |
-| `modalities` | Modalities that participate in sample-ID intersection. Each value is a path string or an object with `path` and optional `split`. |
-| `hierarchical_modalities` | Per-scene data (e.g. intrinsics), same format. Loaded once per scene and cached. |
+| `modalities` | All input modalities. Each value is a path string or an object with `path` and optional `split`. Whether a modality is per-sample or hierarchical is inferred (see below). |
+| `hierarchical_modalities` | Legacy, optional. Same format; entries are pooled with `modalities` and resolved the same way. |
 | `pipeline` | Optional runtime routing block compatible with `euler-inference`. |
 
 **Required modalities per transform:**
 
-| Transform | `modalities` | `hierarchical_modalities` |
+| Transform | Required | Optional |
 |---|---|---|
-| `fog` | `rgb`, `depth`, `semantic_segmentation` | `intrinsics` when available; used for radial depth conversion and camera-profile optics |
+| `fog` | `rgb`, `depth`, `semantic_segmentation` | `intrinsics`; used for radial depth conversion and camera-profile optics |
 | `sky-depth` | `depth`, `semantic_segmentation` | — |
-| `radial` | `depth` | `intrinsics` |
+| `radial` | `depth`, `intrinsics` | — |
+
+**Per-sample vs. hierarchical modalities.** You don't declare a modality's role:
+it is inferred from the ds-crawler indexes. A modality whose qualified IDs
+(hierarchy path plus file ID) match the transform's per-sample inputs is joined per
+sample, e.g. Synscapes' per-image `meta/<id>.json` intrinsics. A modality whose
+files share no sample IDs but sit at or above the samples' hierarchy level is
+matched hierarchically and shared by every sample beneath it, e.g. one intrinsics
+file per scene or camera. A modality that is neither raises an error, and the
+inferred roles are logged. Listing a per-sample modality under
+`hierarchical_modalities` logs a warning and loads it per sample.
 
 When a modality directory contains ds-crawler split files
 (`.ds_crawler/split_<name>.json`), set `split` on that modality to select a subset.
@@ -657,7 +665,7 @@ d_radial(u, v) = d_planar(u, v) * sqrt(((u - cx)/fx)^2 + ((v - cy)/fy)^2 + 1)
 ```
 
 The transform config takes no parameters (`{}`); intrinsics are read from the
-`intrinsics` hierarchical modality.
+`intrinsics` modality, stored either per sample or per scene/camera.
 
 CLI runs write a source-backed depth dataset mirroring the input depth modality's layout
 and writer metadata, with `meta.radial_depth` set to `true` in the emitted `index.json`.

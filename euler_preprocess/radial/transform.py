@@ -15,8 +15,8 @@ from euler_preprocess.common.transform import Transform
 class RadialTransform(Transform):
     """Convert planar (z-buffer) depth to radial (Euclidean) depth.
 
-    Requires camera intrinsics (hierarchical modality ``intrinsics``) to
-    compute the per-pixel ray direction.
+    Requires camera intrinsics (modality ``intrinsics``, stored per sample or
+    per hierarchy level) to compute the per-pixel ray direction.
 
     Config JSON keys:
         ``device`` (str): ``"cpu"`` (default). GPU support reserved for future use.
@@ -61,7 +61,7 @@ class RadialTransform(Transform):
                 if K is None:
                     raise ValueError(
                         f"Sample '{sample.get('id', '?')}' has no intrinsics. "
-                        "RadialTransform requires the 'intrinsics' hierarchical modality."
+                        "RadialTransform requires the 'intrinsics' modality."
                     )
 
                 radial = planar_to_radial_depth(depth, K)

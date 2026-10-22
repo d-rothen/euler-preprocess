@@ -13,8 +13,9 @@ except ImportError:
 def extract_intrinsics(sample: dict) -> np.ndarray | None:
     """Extract the 3x3 intrinsics matrix from a sample dict.
 
-    Hierarchical modalities are stored as ``sample[name][file_id]``.
-    For intrinsics the convention is ``sample["intrinsics"]["intrinsics"]``.
+    Per-sample intrinsics are stored directly as ``sample["intrinsics"]``.
+    Hierarchical modalities are stored as ``sample[name][file_id]``; for
+    intrinsics the convention is ``sample["intrinsics"]["intrinsics"]``.
     """
     intr_dict = sample.get("intrinsics")
     if intr_dict is None:

@@ -12,6 +12,15 @@ class Transform(ABC):
     Subclasses declare the modalities they need via class variables and
     implement :meth:`run` to process samples.
 
+    Required modalities:
+        :attr:`REQUIRED_MODALITIES` are per-sample inputs (RGB, depth, masks);
+        they are always joined per sample and anchor the role inference of
+        every other modality.  :attr:`REQUIRED_HIERARCHICAL_MODALITIES` are
+        further required inputs, such as camera intrinsics, that a dataset may
+        store per sample or once per hierarchy level; their role is inferred
+        from the ds-crawler indexes (see
+        :func:`~euler_preprocess.common.dataset.build_dataset`).
+
     Output slots:
         Most transforms produce a single output (the *primary* slot, declared
         via :attr:`OUTPUT_SLOT`).  Transforms that produce additional auxiliary

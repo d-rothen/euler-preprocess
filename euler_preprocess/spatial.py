@@ -27,7 +27,15 @@ def export_spatial(config):
     dataset_config = {
         key: value for key, value in config.items() if key != "preprocessing"
     }
-    dataset = build_dataset(dataset_config, set(config.get("modalities", {})))
+    # Bound fields with a spatial layout are per-sample images; the role of the
+    # others (e.g. intrinsics) is inferred from their ds-crawler indexes.
+    per_sample = {
+        name
+        for options in variants.values()
+        for name, binding in options["bindings"]["fields"].items()
+        if "H" in binding["profile"]["layout"]
+    }
+    dataset = build_dataset(dataset_config, per_sample)
     plans = {}
     for variant, options in variants.items():
         bindings = deepcopy(options["bindings"])

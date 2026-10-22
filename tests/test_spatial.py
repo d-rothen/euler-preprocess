@@ -77,6 +77,17 @@ def test_producer_captures_and_reloads_five_outputs(tmp_path, zip_output):
         )
 
 
+def test_producer_infers_hierarchical_intrinsics_listed_as_modality(tmp_path):
+    config, ds, plan, _data, _original = config_for(tmp_path)
+    config["modalities"].update(config.pop("hierarchical_modalities"))
+    paths = export_spatial(config)
+    ds.enable_transform_capture({"default": plan})
+    expected = ds[1]
+    for field, path in paths.items():
+        sample = MultiModalDataset({field: Modality(path, metadata_scope="saved")})[0]
+        np.testing.assert_array_equal(sample[field], expected[field])
+
+
 def test_common_builder_consumes_preprocessing(tmp_path):
     config, ds, _, _, _ = config_for(tmp_path)
     configured = build_dataset(config, set(config["modalities"]))
