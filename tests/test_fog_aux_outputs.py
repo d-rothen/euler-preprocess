@@ -1753,6 +1753,7 @@ def test_render_fog_sample_accepts_modalities_and_named_scenario() -> None:
         config=config,
         scenario_profile_name="dark_reference",
         mode="cpu",
+        sky_class=(29, 0, 0),
     )
     image = render_fog_image(
         rgb=rgb,
@@ -1767,6 +1768,7 @@ def test_render_fog_sample_accepts_modalities_and_named_scenario() -> None:
         config=config,
         scenario_profile_name="dark_reference",
         mode="cpu",
+        sky_class=(29, 0, 0),
     )
 
     assert result.scenario_name == "dark_reference"

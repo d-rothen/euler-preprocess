@@ -301,6 +301,7 @@ class FogTransform(Transform):
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth", "semantic_segmentation"}
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
+    MODALITY_FUNCTIONS: ClassVar[dict[str, str]] = {"semantic_segmentation": "sky_mask"}
     SOURCE_MODALITY: ClassVar[str] = "rgb"
     OUTPUT_SLOT: ClassVar[str] = "rgb"
     OUTPUT_SLOTS: ClassVar[tuple[str, ...]] = (
@@ -399,6 +400,8 @@ class FogTransform(Transform):
             self.resize_depth_flag,
             self.seed,
             self.contrast_threshold_default,
+            scenarios=self._scenario_log_entries(),
+            scenario_scope=self._scenario_scope(),
         )
 
         airlight_method = self.config.get("airlight")
@@ -663,6 +666,42 @@ class FogTransform(Transform):
             config = profile["config"]
             name = config.get("name", config.get("id"))
         return None if name is None else str(name)
+
+    def _scenario_log_entries(self) -> list[tuple[str, Any, Any]]:
+        """Return ``(name, weight, model)`` per scenario profile for the config log."""
+        entries: list[tuple[str, Any, Any]] = []
+        for index, profile in enumerate(self.scenario_profiles):
+            payload = self._scenario_payload(profile)
+            model = next(
+                (
+                    payload[key]
+                    for key in ("model", "model_name", "fog_model")
+                    if key in payload
+                ),
+                None,
+            )
+            weight = profile.get(
+                "weight",
+                profile.get("profile_weight", profile.get("probability", 1.0)),
+            )
+            name = self._scenario_name(profile) or f"scenario_{index:03d}"
+            entries.append((name, weight, model))
+        return entries
+
+    def _scenario_scope(self) -> str:
+        """Describe how often a scenario profile is drawn, for the config log."""
+        if self.mode == "progressive":
+            return "progressive"
+        if (
+            self.use_gpu
+            and not self.augmentation_specs
+            and self.gpu_scenario_scope == "batch"
+        ):
+            return (
+                "batch, condition parameters per "
+                f"{self.gpu_condition_parameter_scope}"
+            )
+        return "sample"
 
     def _scenario_config_override(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {

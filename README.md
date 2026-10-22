@@ -99,6 +99,15 @@ loader.
 | `sky-depth` | `depth`, `semantic_segmentation` | — |
 | `radial` | `depth`, `intrinsics` | — |
 
+`fog` and `sky-depth` need `semantic_segmentation` as a boolean sky mask. They load
+it with the `sky_mask` function of the euler-loading module that the index's
+dataset head names, so a `class_segmentation` index works as is: the sky is the
+head's `skyclass` (Synscapes `[23, 23, 23]`, Real Drive Sim `[29, 0, 0]`, VKITTI2
+`[90, 200, 255]`), and the log names the loader and the sky definition in use.
+Set `"function"` in the modality entry to use another loader function, or
+`"function": null` for the one the head declares. A non-binary mask raises an
+error rather than marking every non-zero class as sky.
+
 **Per-sample vs. hierarchical modalities.** You don't declare a modality's role:
 it is inferred from the ds-crawler indexes. A modality whose qualified IDs
 (hierarchy path plus file ID) match the transform's per-sample inputs is joined per
@@ -647,7 +656,8 @@ where sky depth is encoded as zero or infinity and needs a large finite value.
 }
 ```
 
-`sky_depth_value` defaults to `1000.0`.
+`sky_depth_value` defaults to `1000.0`. The sky mask comes from the dataset head as
+described under [Dataset Config](#dataset-config).
 
 CLI runs write a source-backed depth dataset mirroring the input depth modality's paths,
 filenames, extensions, and metadata. Standalone `SkyDepthTransform(...)` usage keeps the

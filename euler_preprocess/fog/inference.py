@@ -58,7 +58,7 @@ def render_fog_image(
     mode: FogInferenceMode = "cpu",
     sample_id: str | None = None,
     sample_index: int = 0,
-    sky_class: Sequence[int | float] | None = (29, 0, 0),
+    sky_class: Sequence[int | float] | None = None,
 ) -> np.ndarray:
     """Render and return only the RGB image for one in-memory sample."""
 
@@ -89,14 +89,15 @@ def render_fog_sample(
     mode: FogInferenceMode = "cpu",
     sample_id: str | None = None,
     sample_index: int = 0,
-    sky_class: Sequence[int | float] | None = (29, 0, 0),
+    sky_class: Sequence[int | float] | None = None,
 ) -> FogInferenceResult:
     """Render fog/camera artifacts for a single in-memory sample.
 
     The call accepts the four modalities used by :class:`FogTransform` without
     requiring a dataset reader or output backend. ``semantic_segmentation`` may
     be either a boolean sky mask or an RGB semantic label map; RGB maps are
-    converted using ``sky_class`` which defaults to ``[29, 0, 0]``.
+    converted using ``sky_class``, the map's sky colour as its dataset head
+    declares it in ``skyclass`` (e.g. ``[29, 0, 0]`` for Real Drive Sim).
     """
 
     if mode not in ("cpu", "gpu"):

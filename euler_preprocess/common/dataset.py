@@ -5,26 +5,27 @@ from collections import Counter
 from euler_preprocess.common.logging import get_logger
 
 
-def _make_modality(entry: str | dict):
+def _make_modality(entry: str | dict, function: str | None = None):
+    """Build a ``Modality``; an entry's own ``function`` replaces *function*."""
     from euler_loading import Modality
 
     if isinstance(entry, str):
-        return Modality(entry)
-    return Modality(
-        entry["path"],
-        **{
-            key: entry[key]
-            for key in (
-                "split",
-                "metadata_scope",
-                "collapse_single",
-                "cache",
-                "applies_to",
-                "hierarchy_scope",
-            )
-            if key in entry
-        },
-    )
+        return Modality(entry, function=function)
+    options = {
+        key: entry[key]
+        for key in (
+            "split",
+            "metadata_scope",
+            "collapse_single",
+            "cache",
+            "applies_to",
+            "hierarchy_scope",
+            "function",
+        )
+        if key in entry
+    }
+    options.setdefault("function", function)
+    return Modality(entry["path"], **options)
 
 
 def _load_index_tree(name: str, modality) -> dict:
@@ -151,6 +152,7 @@ def build_dataset(
     config: dict,
     required_modalities: set[str],
     required_hierarchical: set[str] | None = None,
+    modality_functions: dict[str, str] | None = None,
 ):
     """Build a ``MultiModalDataset`` from a config dict.
 
@@ -169,6 +171,12 @@ def build_dataset(
     same way.  *required_modalities* are per-sample inputs and anchor that
     inference; *required_hierarchical* names further required modalities,
     whose role is inferred like any other.
+
+    *modality_functions* maps a modality to the loader function to use from
+    the module its dataset head names (a transform's ``MODALITY_FUNCTIONS``),
+    e.g. ``sky_mask`` for a ``class_segmentation`` index; the sky then comes
+    from the head's ``skyclass``.  A modality entry's own ``function`` key
+    overrides it, and ``"function": null`` keeps the head's function.
     """
     from euler_loading import MultiModalDataset, SamplePreprocessor
 
@@ -191,7 +199,11 @@ def build_dataset(
             f"'modalities' must contain at least: {', '.join(sorted(required))}"
         )
 
-    modalities = {name: _make_modality(entry) for name, entry in configured.items()}
+    functions = modality_functions or {}
+    modalities = {
+        name: _make_modality(entry, functions.get(name))
+        for name, entry in configured.items()
+    }
     regular, hierarchical = _resolve_roles(modalities, set(required_modalities))
     logger = get_logger()
     for name in regular:

@@ -98,7 +98,9 @@ def normalize_sky_mask(sky_mask) -> np.ndarray:
     """Normalise a sky mask to a 2-D boolean numpy array ``(H, W)``.
 
     Handles torch tensors (GPU loaders) and the ``(1, H, W)`` channel-first
-    layout produced by euler-loading's GPU loaders.
+    layout produced by euler-loading's GPU loaders. A non-boolean input may
+    only hold 0/1: casting class IDs to bool would mark every non-zero class
+    as sky.
     """
     mask = _to_numpy(sky_mask)
     # CHW → take first channel: (C, H, W) → (H, W)
@@ -109,4 +111,15 @@ def normalize_sky_mask(sky_mask) -> np.ndarray:
         mask = mask[0]
     if mask.ndim == 3 and mask.shape[-1] == 1:
         mask = mask[..., 0]
+    if mask.dtype != np.bool_ and np.any((mask != 0) & (mask != 1)):
+        values = np.unique(mask)
+        shown = ", ".join(str(value) for value in values[:8])
+        if values.size > 8:
+            shown += ", ..."
+        raise ValueError(
+            "semantic_segmentation must be a boolean sky mask, got a "
+            f"{mask.dtype} array with values [{shown}]. Load it with the "
+            "dataset's euler-loading sky_mask loader (the CLI selects it "
+            "automatically) or pass a boolean mask."
+        )
     return mask.astype(bool)

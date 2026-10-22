@@ -178,7 +178,14 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
 
     required_modalities = transform_class.REQUIRED_MODALITIES
     required_hierarchical = transform_class.REQUIRED_HIERARCHICAL_MODALITIES or None
-    dataset = build_dataset(config, required_modalities, required_hierarchical)
+    # euler-loading logs which loader (and sky definition) each modality uses.
+    get_logger("euler_loading")
+    dataset = build_dataset(
+        config,
+        required_modalities,
+        required_hierarchical,
+        transform_class.MODALITY_FUNCTIONS,
+    )
     output_backends = prepare_output_backends(config, dataset, transform_class)
     primary_backend = next(iter(output_backends.values()))
     samples = _select_configured_samples(config, dataset, logger)

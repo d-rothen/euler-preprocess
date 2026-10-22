@@ -31,6 +31,7 @@ class SkyDepthTransform(Transform):
     """
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = {"depth", "semantic_segmentation"}
+    MODALITY_FUNCTIONS: ClassVar[dict[str, str]] = {"semantic_segmentation": "sky_mask"}
     SOURCE_MODALITY: ClassVar[str] = "depth"
     OUTPUT_SLOT: ClassVar[str] = "depth"
 
@@ -257,8 +258,7 @@ class SkyDepthTransform(Transform):
             log.warning(
                 "  SANITY CHECK: %.2f%% of pixels are marked as sky in sample "
                 "'%s'. That is suspiciously high — check that the mask is not "
-                "inverted or that `astype(bool)` is not accidentally treating "
-                "every non-zero class id as sky.",
+                "inverted and that the dataset head's `skyclass` names the sky.",
                 pct,
                 sample_id,
             )

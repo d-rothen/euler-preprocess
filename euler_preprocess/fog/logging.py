@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from typing import Any
 
 
 def log_config(
@@ -18,7 +20,14 @@ def log_config(
     resize_depth: bool,
     seed,
     contrast_threshold_default: float,
+    scenarios: Sequence[tuple[str, Any, Any]] = (),
+    scenario_scope: str = "sample",
 ) -> None:
+    """Log the resolved run settings.
+
+    *scenarios* holds ``(name, weight, model)`` per scenario profile, with
+    ``model`` ``None`` when the profile defers to ``selection``.
+    """
     logger.info("Loaded config from %s -> output %s", config_path, out_path)
     logger.info(
         "Device: requested=%s active=%s use_gpu=%s torch=%s",
@@ -36,6 +45,22 @@ def log_config(
         seed,
         contrast_threshold_default,
     )
+    if scenarios:
+        logger.info(
+            "Model selection: %d scenario_profiles (scope=%s) choose the model; "
+            "'selection' only applies to profiles without one",
+            len(scenarios),
+            scenario_scope,
+        )
+        for name, weight, model in scenarios:
+            logger.info(
+                "Scenario %s: weight=%s model=%s",
+                name,
+                weight,
+                "<selection>" if model is None else model,
+            )
+        if all(model is not None for _name, _weight, model in scenarios):
+            return
     selection = config.get("selection")
     if selection:
         mode = selection.get("mode", "fixed")

@@ -181,3 +181,14 @@ class TestSkyDepthTransform:
         transform = SkyDepthTransform(str(cfg_path), str(out_path), strict=False)
         paths = transform.run(samples)
         assert len(paths) == 2
+
+    def test_class_map_raises(self, tmp_path, sky_depth_config):
+        """A class-ID map must not be cast to bool (every non-zero class -> sky)."""
+        depth = np.ones((4, 4), dtype=np.float32)
+        labels = np.full((4, 4), 7, dtype=np.int64)
+        labels[0] = 23
+        samples = [{"id": "labels", "depth": depth, "semantic_segmentation": labels}]
+
+        transform = SkyDepthTransform(str(sky_depth_config), str(tmp_path / "output"))
+        with pytest.raises(ValueError, match="sky_mask loader"):
+            transform.run(samples)

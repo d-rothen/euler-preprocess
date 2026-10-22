@@ -160,18 +160,34 @@ def resolve_scattering_coefficient(
     )
 
 
-def normalize_atmospheric_light(value: np.ndarray) -> np.ndarray:
+def normalize_atmospheric_light(
+    value: np.ndarray, *, allow_8bit: bool = True
+) -> np.ndarray:
+    """Return ``value`` as an RGB triple clipped to ``[0, 1]``.
+
+    With *allow_8bit*, values above 1 are read as an 8-bit colour and divided
+    by 255. That only suits configured colours: estimated airlight comes from
+    ``[0, 1]`` RGB and may overshoot 1 slightly after the estimators' luminance
+    rescaling, so estimate callers pass ``allow_8bit=False`` to clip instead.
+    """
     value = np.asarray(value, dtype=np.float32)
     if value.ndim == 0:
         value = np.array([value, value, value], dtype=np.float32)
     if value.ndim != 1 or value.shape[0] != 3:
         raise ValueError("atmospheric_light must be scalar or length-3 list")
-    if value.max() > 1.0:
+    if allow_8bit and value.max() > 1.0:
         value = value / 255.0
     return np.clip(value, 0.0, 1.0)
 
 
-def normalize_atmospheric_light_torch(value: "torch.Tensor") -> "torch.Tensor":
+def normalize_atmospheric_light_torch(
+    value: "torch.Tensor", *, allow_8bit: bool = True
+) -> "torch.Tensor":
+    """Torch counterpart of :func:`normalize_atmospheric_light`.
+
+    The 8-bit check uses the maximum over every row, so stacked estimates must
+    pass ``allow_8bit=False`` or one overshooting sample rescales the batch.
+    """
     value_t = value.to(torch.float32)
     if value_t.ndim == 0:
         value_t = value_t.repeat(3)
@@ -180,7 +196,7 @@ def normalize_atmospheric_light_torch(value: "torch.Tensor") -> "torch.Tensor":
     if value_t.ndim != 2 or value_t.shape[-1] != 3:
         raise ValueError("atmospheric_light must be scalar or length-3 list")
     max_val = float(value_t.max().item()) if value_t.numel() else 0.0
-    if max_val > 1.0:
+    if allow_8bit and max_val > 1.0:
         value_t = value_t / 255.0
     return torch.clamp(value_t, 0.0, 1.0)
 
@@ -1653,7 +1669,9 @@ def apply_model(
     al_spec = model_cfg.get("atmospheric_light", "from_sky")
     airlight_is_estimated = uses_estimated_airlight(al_spec)
     if airlight_is_estimated:
-        raw_ls_base = normalize_atmospheric_light(estimated_airlight)
+        raw_ls_base = normalize_atmospheric_light(
+            estimated_airlight, allow_8bit=False
+        )
     else:
         sampled_al = sample_value(al_spec, rng)
         raw_ls_base = normalize_atmospheric_light(np.asarray(sampled_al))

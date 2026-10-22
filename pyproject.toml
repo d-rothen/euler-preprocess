@@ -16,7 +16,7 @@ authors = [
 dependencies = [
   "numpy",
   "Pillow",
-  "euler-loading>=2.24.0",
+  "euler-loading>=2.29.0",
   "ds-crawler>=2.11.0",
   "euler-dataset-contract>=0.5.0",
 ]

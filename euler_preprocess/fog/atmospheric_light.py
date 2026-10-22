@@ -124,7 +124,7 @@ class AtmosphericLightResolver:
         airlight_is_estimated = uses_estimated_airlight(al_spec)
         if airlight_is_estimated:
             raw_ls_base = normalize_atmospheric_light_torch(
-                estimated_airlight_t
+                estimated_airlight_t, allow_8bit=False
             ).squeeze(0)
         else:
             sampled_al = sample_value(al_spec, rng)
@@ -156,7 +156,7 @@ class AtmosphericLightResolver:
         airlight_is_estimated = uses_estimated_airlight(al_spec)
         if airlight_is_estimated:
             ls_base = self._estimate_batch_torch(rgb_batch, items, device, method)
-            ls_base = normalize_atmospheric_light_torch(ls_base)
+            ls_base = normalize_atmospheric_light_torch(ls_base, allow_8bit=False)
         else:
             ls_values = []
             for item in items:

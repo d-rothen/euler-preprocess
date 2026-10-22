@@ -20,6 +20,10 @@ class Transform(ABC):
         store per sample or once per hierarchy level; their role is inferred
         from the ds-crawler indexes (see
         :func:`~euler_preprocess.common.dataset.build_dataset`).
+        :attr:`MODALITY_FUNCTIONS` maps a modality to the euler-loading loader
+        function the transform needs, taken from the loader module its
+        dataset head names (``{"semantic_segmentation": "sky_mask"}`` reads a
+        class-segmentation index as sky masks).
 
     Output slots:
         Most transforms produce a single output (the *primary* slot, declared
@@ -32,6 +36,7 @@ class Transform(ABC):
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = set()
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
+    MODALITY_FUNCTIONS: ClassVar[dict[str, str]] = {}
     SOURCE_MODALITY: ClassVar[str | None] = None
     OUTPUT_SLOT: ClassVar[str | None] = None
     OUTPUT_SLOTS: ClassVar[tuple[str, ...]] = ()
