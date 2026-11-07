@@ -10,17 +10,37 @@ except ImportError:
     torch = None
 
 
+def single_calibration(value, *, name: str = "intrinsics"):
+    """Return the one calibration value a sample carries for modality *name*.
+
+    Hierarchical modalities arrive as ``{file_id: value}``. A file whose ID is
+    *name* wins; otherwise the dict must hold exactly one file (e.g. STF's
+    ``calib_cam_stereo_left``). Several files are ambiguous and raise. A
+    non-dict value (per-sample or ``collapse_single``) is returned unchanged.
+    """
+    if not isinstance(value, dict):
+        return value
+    if name in value:
+        return value[name]
+    if not value:
+        return None
+    if len(value) == 1:
+        return next(iter(value.values()))
+    raise ValueError(
+        f"Modality '{name}' matched {len(value)} files for this sample "
+        f"({', '.join(sorted(map(str, value)))}); expected one calibration file"
+    )
+
+
 def extract_intrinsics(sample: dict) -> np.ndarray | None:
     """Extract the 3x3 intrinsics matrix from a sample dict.
 
     Per-sample intrinsics are stored directly as ``sample["intrinsics"]``.
-    Hierarchical modalities are stored as ``sample[name][file_id]``; for
-    intrinsics the convention is ``sample["intrinsics"]["intrinsics"]``.
+    Hierarchical modalities are stored as ``sample[name][file_id]``: the file
+    named ``intrinsics`` or else the only matched file is used (see
+    :func:`single_calibration`).
     """
-    intr_dict = sample.get("intrinsics")
-    if intr_dict is None:
-        return None
-    raw = intr_dict.get("intrinsics") if isinstance(intr_dict, dict) else intr_dict
+    raw = single_calibration(sample.get("intrinsics"))
     if raw is None:
         return None
     return _to_numpy(raw).astype(np.float32)

@@ -1,8 +1,8 @@
 """CLI entry point for euler-preprocess.
 
 Used both by ``python main.py`` and by the installed ``euler-preprocess`` console
-script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``, ``lidar-motion``
-and ``spatial``.
+script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``, ``lidar-motion``,
+``crop``, ``crop-box`` and ``spatial``.
 """
 from __future__ import annotations
 
@@ -257,6 +257,29 @@ def _cmd_lidar_motion(args: argparse.Namespace) -> int:
     return _run_transform(args, LidarMotionTransform)
 
 
+def _cmd_crop(args: argparse.Namespace) -> int:
+    from euler_preprocess.crop.run import run_crop_command
+
+    config_path = Path(args.config).resolve()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    get_logger().info("Config: %s", config_path)
+    run_crop_command(config, config_path.parent)
+    return 0
+
+
+def _cmd_crop_box(args: argparse.Namespace) -> int:
+    from euler_preprocess.crop.spec import parse_crop_config, spatial_preprocessing
+
+    config = parse_crop_config(json.loads(Path(args.config).read_text(encoding="utf-8")))
+    height, width = args.size
+    box = config.geometry(height, width)
+    print(json.dumps(
+        {"box": box.to_dict(), "preprocessing": spatial_preprocessing(box, reference=config.reference)},
+        indent=2,
+    ))
+    return 0
+
+
 def _cmd_spatial(args: argparse.Namespace) -> int:
     from euler_preprocess.spatial import export_spatial
 
@@ -316,6 +339,25 @@ def parse_args() -> argparse.Namespace:
         help="Compensate scanning-lidar points for ego motion during the sweep.",
     )
     lidar_motion_parser.set_defaults(func=_cmd_lidar_motion)
+
+    crop_parser = subparsers.add_parser(
+        "crop", parents=[common],
+        help="Crop RGB, depth and calibration coherently (K' = C K; lidar and extrinsics unchanged).",
+    )
+    crop_parser.set_defaults(func=_cmd_crop)
+
+    crop_box_parser = subparsers.add_parser(
+        "crop-box",
+        help="Print the pixel box a crop config resolves to, and the matching spatial preprocessing block.",
+    )
+    crop_box_parser.add_argument(
+        "--config", "-c", type=str, required=True, help="Path to the crop config JSON file.",
+    )
+    crop_box_parser.add_argument(
+        "--size", type=int, nargs=2, required=True, metavar=("HEIGHT", "WIDTH"),
+        help="Size of the reference raster in pixels.",
+    )
+    crop_box_parser.set_defaults(func=_cmd_crop_box)
 
     spatial_parser = subparsers.add_parser(
         "spatial", parents=[common], help="Export deterministic crop/resize with verified execution receipts.",
