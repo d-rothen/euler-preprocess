@@ -44,6 +44,7 @@ qualitative review.
 | `euler-preprocess fog` | Synthetic fog via the Koschmieder atmospheric scattering model |
 | `euler-preprocess sky-depth` | Override depth values in sky regions with a constant |
 | `euler-preprocess radial` | Convert planar (z-buffer) depth to radial (Euclidean) depth |
+| `euler-preprocess lidar-motion` | Compensate scanning-lidar points for the vehicle's motion during a sweep |
 
 ## Installation
 
@@ -57,6 +58,7 @@ uv pip install "euler-preprocess[gpu,progress]"
 euler-preprocess fog       -c configs/example_dataset_config.json
 euler-preprocess sky-depth -c configs/sky_depth_dataset_config.json
 euler-preprocess radial    -c configs/radial_dataset_config.json
+euler-preprocess lidar-motion -c configs/lidar_motion_dataset_config.json
 ```
 
 ## Dataset Config
@@ -98,6 +100,7 @@ loader.
 | `fog` | `rgb`, `depth`, `semantic_segmentation` | `intrinsics`; used for radial depth conversion and camera-profile optics |
 | `sky-depth` | `depth`, `semantic_segmentation` | — |
 | `radial` | `depth`, `intrinsics` | — |
+| `lidar-motion` | `sparse_depth`, `gnss`, `sensor_timing`, `lidar_to_gnss` | — |
 
 `fog` and `sky-depth` need `semantic_segmentation` as a boolean sky mask. They load
 it with the `sky_mask` function of the euler-loading module that the index's
@@ -680,6 +683,37 @@ The transform config takes no parameters (`{}`); intrinsics are read from the
 CLI runs write a source-backed depth dataset mirroring the input depth modality's layout
 and writer metadata, with `meta.radial_depth` set to `true` in the emitted `index.json`.
 Standalone `RadialTransform(...)` usage keeps the legacy `.npy` output behaviour.
+
+---
+
+## LiDAR Motion Compensation
+
+A scanning lidar measures its points one after another while the vehicle moves.
+The MUSES lidar sweeps its field of view top to bottom in about 85 ms, so
+uncorrected points projected into the frame camera match tall objects at their
+base and drift away towards the top. Across MUSES, 92 % of frames are taken
+above 10 km/h. `lidar-motion` moves every point to where it was at the
+frame camera's mid-exposure. It follows the official MUSES SDK
+(`motion_compensate_pcd`): constant ground speed along the GNSS frame's `x`,
+constant roll, pitch and heading rates.
+
+| Modality | Content | MUSES loader (euler-loading) |
+|---|---|---|
+| `sparse_depth` | `(N, C)` points with each point's time in seconds | `muses.sparse_depth` |
+| `gnss` | The frame's GNSS/IMU record | `muses.gnss` |
+| `sensor_timing` | `camera_exposure_start_us` / `camera_exposure_end_us` | `muses.sensor_timing` (`meta.json`) |
+| `lidar_to_gnss` | `(4, 4)` lidar → GNSS/IMU transform | `muses.read_lidar_to_gnss` (`calib.json`) |
+
+Index `gnss/` like the `lidar` folder, so samples join it by ID. Index
+`meta.json` and `calib.json` as root-level files; the euler-loading docs
+describe the MUSES ego-motion inputs. The transform config takes one optional
+key, `timestamp_column` (default `5`, MUSES' `timestamp` column).
+
+The output is a `sparse_depth` dataset mirroring the input's paths, file names
+and `.bin` format. Only `x, y, z` change. The head records
+`meta.motion_compensated`, and each file's `attributes.motion_compensation`
+holds the target time and the speed and rates used. Point
+`dmd3c-euler`, `euler-eval` or a crop at it in place of the raw lidar.
 
 ---
 

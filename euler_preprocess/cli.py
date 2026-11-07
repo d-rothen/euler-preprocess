@@ -1,7 +1,8 @@
 """CLI entry point for euler-preprocess.
 
 Used both by ``python main.py`` and by the installed ``euler-preprocess`` console
-script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``.
+script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``, ``lidar-motion``
+and ``spatial``.
 """
 from __future__ import annotations
 
@@ -251,6 +252,11 @@ def _cmd_radial(args: argparse.Namespace) -> int:
     return _run_transform(args, RadialTransform)
 
 
+def _cmd_lidar_motion(args: argparse.Namespace) -> int:
+    from euler_preprocess.lidar_motion.transform import LidarMotionTransform
+    return _run_transform(args, LidarMotionTransform)
+
+
 def _cmd_spatial(args: argparse.Namespace) -> int:
     from euler_preprocess.spatial import export_spatial
 
@@ -304,6 +310,12 @@ def parse_args() -> argparse.Namespace:
         help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
     )
     radial_parser.set_defaults(func=_cmd_radial)
+
+    lidar_motion_parser = subparsers.add_parser(
+        "lidar-motion", parents=[common],
+        help="Compensate scanning-lidar points for ego motion during the sweep.",
+    )
+    lidar_motion_parser.set_defaults(func=_cmd_lidar_motion)
 
     spatial_parser = subparsers.add_parser(
         "spatial", parents=[common], help="Export deterministic crop/resize with verified execution receipts.",

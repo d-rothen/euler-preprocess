@@ -1,0 +1,10 @@
+{
+  "transform_config_path": "lidar_motion_config.json",
+  "output_path": "/path/to/muses/lidar_motion_compensated",
+  "modalities": {
+    "sparse_depth": "/path/to/muses/lidar",
+    "gnss": "/path/to/muses/gnss",
+    "sensor_timing": "/path/to/muses/sensor_timing",
+    "lidar_to_gnss": "/path/to/muses/lidar_to_gnss"
+  }
+}
