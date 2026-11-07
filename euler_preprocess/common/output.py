@@ -527,6 +527,106 @@ class SourceBackedOutputBackend:
         self.modality_writer(str(target_path), value, self.modality_meta)
         return target_path
 
+    def _entry_attributes(
+        self, source_entry: Mapping[str, Any], attributes: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        source_attributes = source_entry.get("attributes")
+        merged = dict(source_attributes) if isinstance(source_attributes, dict) else None
+        if attributes:
+            merged = {**(merged or {}), **attributes}
+        return merged
+
+    def _stored_path(self, full_id: str, basename: str) -> Path:
+        relative_path = _relative_path_from_full_id(
+            full_id, basename, separator=getattr(self.dataset_writer, "_separator", None)
+        )
+        return Path(f"{self.dataset_writer.root}::{relative_path}")
+
+    def copy_source(
+        self,
+        full_id: str,
+        source_entry: Mapping[str, Any],
+        data: bytes,
+        *,
+        attributes: dict[str, Any] | None = None,
+    ) -> Path:
+        """Store *data*, the source file's bytes, unchanged at *full_id*.
+
+        The entry keeps the source's basename, path properties and attributes
+        (merged with *attributes*), so the output indexes like the source.
+        """
+        basename = Path(str(source_entry["path"])).name
+        entry = dict(source_entry)
+        merged = self._entry_attributes(source_entry, attributes)
+        if isinstance(self.dataset_writer, ZipDatasetWriter):
+            self.dataset_writer.write(
+                full_id, basename, data, source_entry=entry, attributes=merged
+            )
+            return self._stored_path(full_id, basename)
+        target_path = self.dataset_writer.get_path(
+            full_id, basename, source_entry=entry, attributes=merged
+        )
+        target_path.write_bytes(data)
+        return target_path
+
+    def update_source(
+        self,
+        full_id: str,
+        source_entry: Mapping[str, Any],
+        data: bytes,
+        value: Any,
+        meta: dict[str, Any] | None,
+        *,
+        attributes: dict[str, Any] | None = None,
+    ) -> Path:
+        """Store a copy of the source file, then let the writer update it to *value*.
+
+        For writers that merge into an existing file (e.g. camera-info
+        ``write_intrinsics``), so every field the new value does not describe
+        is kept. The writer always receives a real file, also for zip outputs.
+        """
+        if self.modality_writer is None:
+            raise ValueError(f"No writer is available for modality '{self.source_modality}'")
+        basename = Path(str(source_entry["path"])).name
+        entry = dict(source_entry)
+        merged = self._entry_attributes(source_entry, attributes)
+        if isinstance(self.dataset_writer, ZipDatasetWriter):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                temp_path = Path(tmpdir) / basename
+                temp_path.write_bytes(data)
+                self.modality_writer(str(temp_path), value, meta)
+                self.dataset_writer.write(
+                    full_id,
+                    basename,
+                    temp_path.read_bytes(),
+                    source_entry=entry,
+                    attributes=merged,
+                )
+            return self._stored_path(full_id, basename)
+        target_path = self.dataset_writer.get_path(
+            full_id, basename, source_entry=entry, attributes=merged
+        )
+        target_path.write_bytes(data)
+        self.modality_writer(str(target_path), value, meta)
+        return target_path
+
+    def update_head_meta(self, updates: Mapping[str, Any]) -> None:
+        """Merge *updates* into the output head's ``modality.meta``; ``None`` removes a key."""
+        meta = dict(self.dataset_writer.head.get("modality", {}).get("meta") or {})
+        for key, value in updates.items():
+            if value is None:
+                meta.pop(key, None)
+            else:
+                meta[key] = value
+        self.dataset_writer.set_modality_meta(meta)
+        legacy_meta = self.index_overrides.get("meta")
+        if isinstance(legacy_meta, dict):
+            for key, value in updates.items():
+                if value is None:
+                    legacy_meta.pop(key, None)
+                else:
+                    legacy_meta[key] = value
+
     def set_hierarchy_separator(self, separator: str) -> None:
         """Set the writer hierarchy separator used for future entries."""
         self.dataset_writer.set_hierarchy_separator(separator)
@@ -714,6 +814,68 @@ def prepare_output_backend(
         pipeline_manifest_targets=[pipeline_target] if pipeline_target else [],
         index_overrides=_legacy_index_overrides(index_output),
     )
+
+
+def prepare_modality_output_backend(
+    dataset: MultiModalDataset,
+    modality: str,
+    root: str | Path,
+    *,
+    storage: str = "directory",
+    writer: Any = None,
+    meta_overrides: Mapping[str, Any] | None = None,
+    metadata_scope: str | None = None,
+    path_prefix: str | None = None,
+) -> SourceBackedOutputBackend:
+    """Create a backend that mirrors *modality*'s index, for any regular or hierarchical modality.
+
+    Unlike :func:`prepare_output_backend` it needs no transform class: the
+    output head is the source head with *meta_overrides* merged into
+    ``modality.meta``. *writer* defaults to the modality's euler-loading
+    writer and may stay ``None`` when only :meth:`SourceBackedOutputBackend.copy_source`
+    is used. ``storage`` is ``"directory"`` or ``"zip"`` (then *root* ends in ``.zip``).
+    *metadata_scope* and *path_prefix* let several modalities share one root
+    (``.ds_crawler/<scope>/`` metadata, files below ``<prefix>/``).
+    """
+    if storage not in {"directory", "zip"}:
+        raise ValueError(f"storage must be 'directory' or 'zip', got {storage!r}")
+    index_output = dataset.get_modality_index(modality)
+    if meta_overrides:
+        merged_meta = _modality_meta(index_output)
+        merged_meta.update(meta_overrides)
+        index_output = dict(index_output)
+        index_output["meta"] = merged_meta
+        _set_head_meta(index_output, merged_meta)
+    if writer is None:
+        try:
+            writer = dataset.get_writer(modality)
+        except (KeyError, ValueError):
+            writer = None
+
+    root = Path(root)
+    dataset_writer = create_dataset_writer_from_index(
+        index_output=index_output,
+        root=root,
+        zip=storage == "zip",
+        metadata_scope=metadata_scope,
+        path_prefix=path_prefix,
+    )
+    return SourceBackedOutputBackend(
+        source_modality=modality,
+        root=root,
+        dataset_writer=dataset_writer,
+        modality_writer=writer,
+        modality_meta=_modality_meta(index_output),
+        index_overrides=_legacy_index_overrides(index_output),
+    )
+
+
+def write_pipeline_outputs_manifest(
+    manifest_path: str | Path,
+    output_targets: list[PipelineOutputTargetConfig],
+) -> None:
+    """Write the pipeline outputs manifest listing *output_targets*."""
+    _write_pipeline_outputs_manifest(Path(manifest_path), output_targets)
 
 
 def _build_auxiliary_backend(

@@ -1,8 +1,12 @@
 # Coherent cropping plan
 
-Status: plan only, nothing implemented yet. First target: **SeeingThroughFog**
-(euler-loading's `princeton_dense` loader) with `rgb`, `sparse_depth`,
-`intrinsics` and `camera_extrinsics`. Written 2026-11-06 against
+Status: **phases 1 and 3 implemented** (2026-11-07) as `euler-preprocess crop`
+(plus `crop-box`), for **SeeingThroughFog** (euler-loading's `princeton_dense`
+loader) with `rgb`, `sparse_depth`, `intrinsics` and `camera_extrinsics`; see §5
+for results. Phase 2 (other datasets) is open. The euler-loading side shipped in
+2.31.0 (STF fixes) and 2.32.0 (MUSES inputs); phase 3 uses euler-loading 2.33.0
+and ds-crawler 2.14.0 (both released), which euler-preprocess now requires.
+euler-view launches it with the `euler-preprocess-crop` addon. Written 2026-11-06 against
 euler-preprocess 3.17.0 and euler-loading 2.30.0.
 
 ## 1. Is there a pathway today?
@@ -72,10 +76,10 @@ two different K. SeeingThroughFog keeps them in separate files.
 | `intrinsics` | `calib_cam_stereo_left.json`, one file, matched hierarchically | `read_intrinsics` (3×3) | ROS CameraInfo: `K, D, R, P, width, height, roi, …` | intrinsics | Patched copy via `princeton_dense.write_intrinsics`: K and P `cx`/`cy`, `width`, `height` |
 | `camera_extrinsics` | `calib_tf_tree_full.json`, one file | `read_extrinsics` (4×4, HDL64 → `cam_stereo_left_optical`) | ROS TF list | unchanged | Byte copy |
 
-The byte copies need no writer. `princeton_dense.write_intrinsics` now exists
-in the euler-loading working tree (§3.2), so the intrinsics patch is covered.
+The byte copies need no writer. `princeton_dense.write_intrinsics` (euler-loading
+2.31.0, §3.2) covers the intrinsics patch.
 
-### 3.2 Fixed in euler-loading (not yet committed): `read_intrinsics` returned the wrong matrix for `_lut` images
+### 3.2 Fixed in euler-loading 2.31.0: `read_intrinsics` returned the wrong matrix for `_lut` images
 
 - `princeton_dense.read_intrinsics` returns `K`
   (`euler_loading/loaders/_princeton_dense.py:170`).
@@ -91,7 +95,7 @@ in the euler-loading working tree (§3.2), so the intrinsics patch is covered.
   about ±55 px at the top and bottom.
 - This is independent of cropping, but a crop corrects whichever matrix the
   loader returns, so it had to be settled first.
-- Done in the euler-loading working tree: `read_intrinsics` now returns the
+- Released in euler-loading 2.31.0: `read_intrinsics` now returns the
   rectified `P[:, :3]` by default (a behaviour change, in its CHANGELOG).
   `intrinsics_matrix: "K"` (alias `"raw"`) in per-file attributes or head
   meta selects the raw K.
@@ -123,8 +127,8 @@ in the euler-loading working tree (§3.2), so the intrinsics patch is covered.
 - Raw TIFF datasets (`princeton_stf+rgb`):
   - `princeton_dense.rgb` silently returns an all-white image for them: Pillow
     clips 12-bit data. Their head must name `rccb`.
-  - `rccb` swapped red and blue; it now demosaics as GRBG (fixed in the
-    euler-loading working tree).
+  - `rccb` swapped red and blue; it now demosaics as GRBG (fixed in
+    euler-loading 2.31.0).
   - The raw frames are not pinhole images (k1 = −0.57), so use the `_lut`
     images for depth evaluation.
 - The official crops are pixel boxes, e.g. `RGB2Gatedv2` keeps rows 202–970 and
@@ -136,8 +140,10 @@ in the euler-loading working tree (§3.2), so the intrinsics patch is covered.
   `remove: {top: 34, bottom: 46, left: 16, right: 0}` (pixel units) leaves a
   fully valid 1904×944 image (91.4 % of the frame). That's a sensible default
   crop for depth evaluation, or else mask those pixels. Computed from
-  `calib_cam_stereo_left.json` and the official conversion code; confirm on a
-  real frame.
+  `calib_cam_stereo_left.json` and the official conversion code, and confirmed
+  on two real dense-fog frames: the black pixels reach 33 rows at the top, 45 at
+  the bottom and 15 columns on the left, and none remain inside the box. Shipped
+  as `configs/crop_stf_valid_region_config.json`.
 - Resampling in the official rectification is mild but uneven: about 1.11 raw
   px per output px at the centre, but 0.76–0.81 near the left and right edges
   (≈1.3× upsampled, so softer there). The `_lut` tone mapping also applies
@@ -291,6 +297,9 @@ modality name, which is what causes the hazard in §1.
 - `euler_preprocess/crop/calibration.py`: hierarchical writer (unique-box
   check, copy then merge).
 - `euler_preprocess/crop/verify.py`.
+- `euler_preprocess/crop/files.py` (added while implementing): zip-aware reads
+  of source files, value fingerprints for the verify step, and the
+  recorded-image-size check for JSON calibration files.
 - `euler_preprocess/common/output.py`: byte-copy registration helper, and a
   source-backed backend factory for any modality with head-meta overrides.
 - `euler_preprocess/common/intrinsics.py`: `single_calibration(value)`. A
@@ -300,17 +309,45 @@ modality name, which is what causes the hazard in §1.
 - `euler_preprocess/cli.py`: a `crop` subcommand with its own `_cmd_crop`, like
   `_cmd_spatial`, because the config drives the modality set.
 - `configs/crop_config.json`, `configs/crop_stf_dataset_config.json`, a README
-  section and a CHANGELOG entry. Bump `pyproject.toml` to
-  `euler-loading>=2.31.0`.
+  section and a CHANGELOG entry. The `euler-loading` pin (`>=2.32.0`, raised
+  for `lidar-motion`) already covers 2.31.0.
 - Optional `tools/check_crop_projection.py`: overlay projected lidar on the
   cropped RGB for a few frames, as a visual K-vs-P and crop check.
 
 ## 5. Work plan
 
-### Phase 1: SeeingThroughFog end to end
+### Phase 1: SeeingThroughFog end to end — implemented 2026-11-07
 
-euler-loading (done in the working tree, uncommitted; ships with the next
-release):
+Results:
+- **Tests:** `tests/test_crop.py` (STF-format fixture: directory and zip
+  outputs with the pipeline manifest, sample selection, the hierarchical
+  conflict, a calibration for another resolution, a raster without a writer,
+  unsafe configs), `test_crop_spec.py`, `test_crop_roles.py`,
+  `test_intrinsics.py`. Full suite 273 passed, 3 skipped. The opt-in real-data
+  test (`EULER_PREPROCESS_STF_ROOT`) passes on two real frames.
+- **Real frames** (two dense-fog `_lut` frames, valid-region crop): every §3.4
+  criterion holds. RGB is the bit-exact slice, lidar and the TF tree are
+  byte-identical, and `K`/`P` shift by exact float64 integers with `D`, `R`,
+  `roi` and the header untouched. Projections with the cropped `P` agree with the
+  shifted originals to 1e-10 px.
+- **dmd3c-euler:** its own `build_dataset` loads the cropped roots unchanged, and
+  its `project_sparse_depth` raster equals the crop of the uncropped projection
+  (0 differing pixels). DMD3C inference itself was not run (no checkpoint or GPU
+  available).
+
+Notes from implementing:
+- euler-loading's datasets resolve the GPU (torch, CHW) loader variant, so the
+  crop slices CHW tensors in practice; the role's layout comes from the
+  annotation of that loader.
+- Each output head's `meta.crop` holds `reference`, `spec` and `boxes` (one
+  box per reference size), set at finalize. `meta.dimensions` follows the crop
+  when present.
+- With `pipeline.output_targets`, every modality needs a target (slot = name,
+  `datasetType` must match the source); the manifest lists them all and is
+  written after verification passes.
+- Outputs inside a source dataset are refused.
+
+euler-loading (released in 2.31.0):
 
 1. `princeton_dense.write_intrinsics` (CPU and GPU share one function) merges
    into an existing ROS CameraInfo JSON, as described in §3.2.
@@ -369,9 +406,11 @@ Verified with the real side data:
 - The GNSS timestamp precedes mid-exposure by up to 16.6 ms, so `meta.json`'s
   exposure times are needed.
 
-Implemented (2026-11-07; uncommitted in both repos). The side data became
-ordinary euler-loading modalities, consumed by euler-preprocess. ds-crawler is
-unchanged: it only interprets paths, never file contents.
+Implemented 2026-11-07 and released (euler-loading 2.32.0; euler-preprocess
+`lidar-motion`, plus the euler-view addon `euler-preprocess-lidar-motion`). The
+side data became ordinary euler-loading modalities, consumed by
+euler-preprocess. ds-crawler is unchanged: it only interprets paths, never file
+contents.
 
 | Modality | ds-crawler indexing | euler-loading |
 |---|---|---|
@@ -389,26 +428,60 @@ Results:
 - **Real data:** on the three real frames the CLI output reproduces the
   verified pole straightening.
 
-Registered in euler-dataset-contract (uncommitted) as `kinematics.platform.state`,
-`timing.platform.acquisition` and `geometry.platform.extrinsics`. Still open:
-release euler-loading with these loaders, then raise euler-preprocess's
-`euler-loading` pin.
+Registered in euler-dataset-contract as `kinematics.platform.state`,
+`timing.platform.acquisition` and `geometry.platform.extrinsics`.
+euler-preprocess requires `euler-loading>=2.32.0`, the first release with these
+loaders.
 
 The side data stays with the local dataset: MUSES license §2.3 forbids
 distributing it.
 
-### Phase 3: optional
+### Phase 3 — implemented 2026-11-07
 
-- `point_clouds: "prune_to_crop"`: drop points that project outside the box.
-  This needs sparse-depth writers, is lossy, and must use the same projection as
-  the consumers.
-- A single scoped output root (one `metadata_scope` per modality), matching
-  dmd3c's `--dataset-root`.
-- Resize, with the same maths: `K' = S·C·K`. The official `Sweden2PSMNet` mode
-  halves 1920×1024.
-- A percentage helper for `spatial` that emits `crop: {size, offset}`.
+- `point_clouds: "prune_to_crop"`: keeps the points with `z > 0` whose pixel
+  `rint(K'·T·X)` lies in the output image, the projection dmd3c-euler's
+  `project_sparse_depth` uses, with a 1e-6 px margin so a rounding boundary
+  never drops a visible point. Intrinsics and extrinsics are found by role
+  (`projection` names them when ambiguous). Needed a SeeingThroughFog writer:
+  `princeton_dense.write_sparse_depth` (euler-loading). Per-file
+  `attributes.point_clouds` records the source and kept counts.
+- A single scoped output root (`"output_layout": "scoped"`): one metadata scope
+  per modality, its files below `<name>/` (ds-crawler writer `path_prefix`).
+  Zip roots are staged as a directory and packed once, since one zip writer
+  owns an archive. dmd3c's `--dataset-root` reads it.
+- Resize after the crop (`resize: {size | scale}`): `K' = S·C·K` through
+  euler-loading's `crop_intrinsics` and `resize_intrinsics`. Rasters go through
+  the new public `euler_loading.resize_raster`, the same code as the online
+  `Resize`: bilinear for `rgb`/`rccb`, nearest otherwise (depth, masks, labels).
+  Sparse-depth rasters are refused.
+- `euler-preprocess crop-box -c <crop config> --size H W` prints the box and a
+  `spatial` `preprocessing` block (`crop` with `size`/`offset`, then `resize`).
+- Every encoded raster or pruned cloud is decoded right away with the
+  modality's loader and must match (exactly, or within half an 8-bit step after
+  interpolation); the verify step then compares the reloaded datasets with those
+  decoded values.
 
-## 6. Decisions needed
+The two private hooks of phase 1 became public APIs:
+- euler-loading: `MultiModalDataset.get_loader`, `get_loader_meta` and
+  `get_hierarchical_files`, plus `get_modality_meta(loader)`;
+- ds-crawler: `DatasetWriter.set_modality_meta` (and `path_prefix`).
+euler-preprocess requires euler-loading 2.33.0 and ds-crawler 2.14.0.
+
+Results:
+- **Tests:** euler-preprocess 292 passed, 3 skipped; euler-loading 1022 passed;
+  ds-crawler's new writer tests pass.
+- **Real STF frames** (valid-region crop):
+  - pruning keeps 7.4 % of the HDL64 points;
+  - dmd3c-euler's projection of the pruned clouds equals the projection of
+    all points through the output camera, for the crop alone and with a
+    0.5x resize (472×952).
+
+An euler-view addon (`euler-preprocess-crop`) launches the crop for a dataset
+family.
+
+## 6. Decisions
+
+Phase 1 adopted every recommendation below.
 
 | # | Decision | Recommendation |
 |---|---|---|
@@ -426,7 +499,7 @@ distributing it.
    euler-loading: crop or resize only values whose spatial size matches the
    reference, or classify fields from the loader annotations.
 2. `princeton_dense.read_intrinsics` returned raw `K` for rectified `_lut`
-   images (§3.2). Fixed in the euler-loading working tree.
+   images (§3.2). Fixed in euler-loading 2.31.0.
 3. `generic_dense_depth` PNG depth with `scale_to_meters_override` doesn't
    survive decode → write: 10.0 m reloads as 0.039 m. The loader applies the
    scale (`generic_dense_depth.py:133`), `write_depth` (`:226`) writes
@@ -436,11 +509,13 @@ distributing it.
    (`vkitti2.py:208`), so it raises on the documented header line
    `frame cameraID r1,1 …`. This is also open question 4 in
    `euler-dataset-contract/docs/ecosystem-streamlining-plan.md`.
-5. `extract_intrinsics` only resolves hierarchical intrinsics whose file ID is
-   `"intrinsics"`, so radial and fog miss STF's `calib_cam_stereo_left`.
+5. `extract_intrinsics` only resolved hierarchical intrinsics whose file ID is
+   `"intrinsics"`, so radial and fog missed STF's `calib_cam_stereo_left`.
+   Fixed with phase 1 (`single_calibration`): a single file is used whatever
+   its ID; several files raise.
 6. RGB writers always emit PNG bytes. VKITTI2 `.jpg` sources become PNG data
    under `.jpg` names, and Real Drive Sim RGBA sources lose their alpha channel.
 7. `princeton_dense.rccb` demosaiced as GBRG, swapping red and blue. Fixed in
-   the euler-loading working tree (GRBG).
+   euler-loading 2.31.0 (GRBG).
 8. `princeton_dense.rgb` on a 12-bit TIFF returns an all-white image without
    an error. Not fixed: a guard that raises would be a small follow-up.

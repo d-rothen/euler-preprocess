@@ -45,6 +45,8 @@ qualitative review.
 | `euler-preprocess sky-depth` | Override depth values in sky regions with a constant |
 | `euler-preprocess radial` | Convert planar (z-buffer) depth to radial (Euclidean) depth |
 | `euler-preprocess lidar-motion` | Compensate scanning-lidar points for the vehicle's motion during a sweep |
+| `euler-preprocess crop` | Crop RGB, depth, intrinsics and extrinsics coherently |
+| `euler-preprocess crop-box` | Print the pixel box a crop config gives for an image size |
 
 ## Installation
 
@@ -59,6 +61,7 @@ euler-preprocess fog       -c configs/example_dataset_config.json
 euler-preprocess sky-depth -c configs/sky_depth_dataset_config.json
 euler-preprocess radial    -c configs/radial_dataset_config.json
 euler-preprocess lidar-motion -c configs/lidar_motion_dataset_config.json
+euler-preprocess crop      -c configs/crop_stf_dataset_config.json
 ```
 
 ## Dataset Config
@@ -714,6 +717,110 @@ and `.bin` format. Only `x, y, z` change. The head records
 `meta.motion_compensated`, and each file's `attributes.motion_compensation`
 holds the target time and the speed and rates used. Point
 `dmd3c-euler`, `euler-eval` or a crop at it in place of the raw lidar.
+
+---
+
+## Coherent Crop
+
+`crop` cuts the same box out of every image-shaped modality and corrects
+everything that refers to the pixel grid, so a cropped bundle projects exactly
+like the original:
+
+| Modality kind | Crop |
+|---|---|
+| Rasters: RGB, dense depth, masks | Sliced; no resampling, so values are unchanged |
+| Pinhole intrinsics `K` (or `P` for rectified images) | `cx -= left`, `cy -= top`; `fx`, `fy`, skew unchanged |
+| Lidar point clouds | Copied byte for byte, or pruned to the points that project into the crop |
+| Extrinsics | Copied byte for byte |
+
+The extrinsics need no change, because `C·K·[R|t]·X = K'·[R|t]·X` with
+`C = [[1,0,-left],[0,1,-top],[0,0,1]]`: the whole correction lives in the
+camera matrix, which is also what the official SeeingThroughFog tools do. An
+optional resize afterwards adds `S` (an `align_corners=False` rescale), so
+`K' = S·C·K`, still with untouched extrinsics.
+Which kind a modality is comes from its euler-loading loader annotation
+(`shape`, `type`), never from its name.
+
+The dataset config lists every modality to crop; whether a modality is
+per-sample or hierarchical (shared calibration) is inferred from its index:
+
+```json
+{
+  "transform_config_path": "crop_stf_valid_region_config.json",
+  "output_path": "/data/stf_crop",
+  "modalities": {
+    "rgb": "/data/stf/cam_stereo_left_lut",
+    "sparse_depth": "/data/stf/lidar_hdl64_strongest",
+    "intrinsics": "/data/stf/calib_cam_stereo_left",
+    "camera_extrinsics": "/data/stf/calib_tf_tree"
+  },
+  "samples": {"start": 0, "count": 100}
+}
+```
+
+Each modality is written to `<output_path>/<name>`, or to its
+`pipeline.output_targets[]` entry (`slot` = the modality name; directory or zip).
+With pipeline targets, every modality needs one and the outputs manifest lists
+them all. `"output_layout": "scoped"` writes one root at `output_path` instead
+(a directory or `.zip`): one ds-crawler metadata scope per modality, named after
+it, with its files below `<name>/`. That is the layout dmd3c-euler's
+`--dataset-root` reads. The dataset config must not contain `preprocessing`.
+
+The crop config (`configs/crop_config.json`) describes the box relative to the
+`reference` raster:
+
+```json
+{
+  "reference": "rgb",
+  "crop": {"remove": {"top": 0.20, "bottom": 0.05, "left": 0.15, "right": 0.19}},
+  "point_clouds": "keep",
+  "verify": "all"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `crop.remove` | What to cut off each edge (`top`, `bottom`, `left`, `right`) |
+| `crop.keep` + `crop.anchor` | The kept `height` / `width`, placed at `center` (default), `top`, `bottom`, `left`, `right`, `top_left`, `top_right`, `bottom_left` or `bottom_right` |
+| `crop.unit` | `fraction` (default) or `pixel`. Fractions lie in `[0, 1)` (`keep`: `(0, 1]`) and round half up per edge: `floor(f · size + 0.5)` |
+| `crop.multiple_of` | Trim the kept size down to a multiple, e.g. a network stride; the extra rows and columns come off both sides evenly |
+| `resize` | Optional, after the crop: `{"size": [h, w]}` or `{"scale": 0.5}` (or `[sy, sx]`); `interpolation` maps modality names to `nearest`, `bilinear` or `bicubic` |
+| `point_clouds` | `keep` (default): copy every point, consumers clip to the image. `prune_to_crop`: keep only the points with `z > 0` whose pixel `rint(K'·T·X)` lies in the output image, as consumers such as dmd3c-euler project them |
+| `projection` | For `prune_to_crop`: the `intrinsics` and `extrinsics` modalities to project with, when the dataset has more than one candidate |
+| `verify` | `all` (default), `none`, or a sample count: reopen the outputs and check every file against the crop (rasters and pruned clouds as encoded, intrinsics to 1e-3 px, copies byte-identical) |
+| `roles` | Override a modality's kind with `raster` or `copy`, for loaders whose annotation the crop does not know |
+
+Pixel units reproduce the official boxes exactly, e.g. `RGB2Gatedv2` is
+`{"remove": {"top": 202, "bottom": 54, "left": 280, "right": 360}, "unit": "pixel"}`.
+`configs/crop_stf_valid_region_config.json` removes the black border the
+SeeingThroughFog rectification leaves on `_lut` frames (top 34, bottom 46,
+left 16 px), keeping a fully valid 1904×944 image.
+
+Rasters are re-encoded with the dataset's euler-loading writer, so a raster
+modality needs one (SeeingThroughFog's raw `rccb` TIFFs have none). Each
+encoded file is decoded again right away and must give back the cropped values:
+exactly, or for an interpolated resize within half an 8-bit step. A resize
+interpolates colour images (`rgb`, `rccb`) bilinearly and takes the nearest
+pixel for everything else, so depth and label values stay real values;
+sparse-depth rasters are not resized. Pruned point clouds need a writer too
+(`princeton_dense.write_sparse_depth`, `muses.write_sparse_depth`). Intrinsics
+are written by copying the source file and letting its writer move the matrices
+onto the new grid: for a ROS CameraInfo file such as
+`calib_cam_stereo_left.json`, `K` and `P` shift by exact integers, `width` and
+`height` become the crop size, and `D`, `R`, `roi` and the header are kept. A
+calibration file that records another image size than the reference rasters
+is refused. A hierarchical file is written once, so every sample sharing it
+must get the same box; mixed image sizes under one calibration file are an
+error. Every output head records `meta.crop` (reference, spec and boxes), and
+every file its own `attributes.crop` box; pruned clouds also record
+`attributes.point_clouds` (source and kept point counts).
+
+To reproduce a crop with `euler-preprocess spatial`, print its pixel box and
+the matching `preprocessing` block for a reference size:
+
+```bash
+euler-preprocess crop-box -c configs/crop_config.json --size 1024 1920
+```
 
 ---
 
