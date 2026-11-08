@@ -1,0 +1,6 @@
+{
+  "reference": "rgb",
+  "crop": {"remove": {"top": 0, "bottom": 160, "left": 0, "right": 0}, "unit": "pixel"},
+  "point_clouds": "keep",
+  "verify": "all"
+}

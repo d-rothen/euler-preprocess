@@ -569,6 +569,28 @@ class SourceBackedOutputBackend:
         target_path.write_bytes(data)
         return target_path
 
+    def updated_bytes(
+        self,
+        source_entry: Mapping[str, Any],
+        data: bytes,
+        value: Any,
+        meta: dict[str, Any] | None,
+    ) -> bytes:
+        """Return *data*, the source file's bytes, after the writer has updated them to *value*.
+
+        For writers that merge into an existing file (e.g. camera-info
+        ``write_intrinsics``), so every field the new value does not describe
+        is kept. The writer works on a temporary copy named like the source.
+        """
+        if self.modality_writer is None:
+            raise ValueError(f"No writer is available for modality '{self.source_modality}'")
+        basename = Path(str(source_entry["path"])).name
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = Path(tmpdir) / basename
+            temp_path.write_bytes(data)
+            self.modality_writer(str(temp_path), value, meta)
+            return temp_path.read_bytes()
+
     def update_source(
         self,
         full_id: str,
@@ -579,36 +601,9 @@ class SourceBackedOutputBackend:
         *,
         attributes: dict[str, Any] | None = None,
     ) -> Path:
-        """Store a copy of the source file, then let the writer update it to *value*.
-
-        For writers that merge into an existing file (e.g. camera-info
-        ``write_intrinsics``), so every field the new value does not describe
-        is kept. The writer always receives a real file, also for zip outputs.
-        """
-        if self.modality_writer is None:
-            raise ValueError(f"No writer is available for modality '{self.source_modality}'")
-        basename = Path(str(source_entry["path"])).name
-        entry = dict(source_entry)
-        merged = self._entry_attributes(source_entry, attributes)
-        if isinstance(self.dataset_writer, ZipDatasetWriter):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                temp_path = Path(tmpdir) / basename
-                temp_path.write_bytes(data)
-                self.modality_writer(str(temp_path), value, meta)
-                self.dataset_writer.write(
-                    full_id,
-                    basename,
-                    temp_path.read_bytes(),
-                    source_entry=entry,
-                    attributes=merged,
-                )
-            return self._stored_path(full_id, basename)
-        target_path = self.dataset_writer.get_path(
-            full_id, basename, source_entry=entry, attributes=merged
-        )
-        target_path.write_bytes(data)
-        self.modality_writer(str(target_path), value, meta)
-        return target_path
+        """Store a copy of the source file, updated by the writer to *value* (see :meth:`updated_bytes`)."""
+        updated = self.updated_bytes(source_entry, data, value, meta)
+        return self.copy_source(full_id, source_entry, updated, attributes=attributes)
 
     def update_head_meta(self, updates: Mapping[str, Any]) -> None:
         """Merge *updates* into the output head's ``modality.meta``; ``None`` removes a key."""

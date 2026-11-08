@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `crop` supports MUSES (with euler-loading 2.35.0's MUSES writers):
+  - `calib.json` holds the frame camera's `K` and every extrinsic. The
+    `intrinsics` modality patches it once, and every other modality indexing
+    the same file, or a byte-identical copy (`camera_extrinsics`,
+    `lidar_to_gnss`), is written with the patched bytes, so the bundle holds
+    one `K`. What each of them reads from the patched file must stay as it was;
+    two intrinsics modalities patching one file differently are refused.
+  - GNSS records (`gnss`) and `meta.json` timing (`sensor_timing`) are copied
+    unchanged by default.
+  - `configs/crop_muses_hood_config.json` cuts the engine hood off the
+    1920×1080 frame camera images (bottom 160 rows, 1920×920 stay), with
+    `configs/crop_muses_dataset_config.json` as the dataset config.
+- Require euler-loading 2.35.0 for the MUSES writers.
+
 - Add `euler-preprocess lidar-motion`, which compensates scanning-lidar points for
   the vehicle's motion during the sweep. It follows the MUSES SDK, moving each
   point to the frame camera's mid-exposure using the `gnss`, `sensor_timing`
