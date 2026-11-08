@@ -728,7 +728,8 @@ like the original:
 
 | Modality kind | Crop |
 |---|---|
-| Rasters: RGB, dense depth, masks | Sliced; no resampling, so values are unchanged |
+| Rasters: RGB, dense depth | Sliced; no resampling, so values are unchanged |
+| Label rasters: semantic segmentation (the ground truth that also holds the sky), instance and panoptic segmentation, sky masks | Cropped in the stored file, so every class, channel, palette and bit depth is kept; resized only by nearest |
 | Pinhole intrinsics `K` (or `P` for rectified images) | `cx -= left`, `cy -= top`; `fx`, `fy`, skew unchanged |
 | Lidar point clouds | Copied byte for byte, or pruned to the points that project into the crop |
 | Extrinsics | Copied byte for byte |
@@ -806,9 +807,24 @@ are. `configs/crop_muses_hood_config.json` cuts the engine hood off the
 off the bottom only, so `K` and every `calib.json` stay byte-identical. Run
 `lidar-motion` first and crop its output (`configs/crop_muses_dataset_config.json`).
 GNSS records and `meta.json` sensor timing are copied unchanged, like the
-extrinsics. MUSES label images (semantic, panoptic, sky) are sliced like the RGB.
+extrinsics. MUSES label images (`gt_semantic`, `gt_panoptic`) are cropped in place like
+any label raster.
 
-Rasters are re-encoded with the dataset's euler-loading writer, so a raster
+Label rasters (loader types `semantic_segmentation`, `semantic_segmentation_color`,
+`instance_segmentation`, `panoptic_segmentation`, `sky_mask`) are cropped in the
+file itself: PNG, TIFF and BMP through Pillow in their own mode and palette,
+`.npy`/`.npz` through NumPy. A semantic segmentation is the ground truth for
+every class including the sky, and consumers read it through different
+functions (`class_segmentation`, or `sky_mask` for sky-depth). Re-encoding the
+decoded labels would drop what one function does not return: Real Drive Sim's
+non-red channels, an indexed PNG's palette, or every class but the sky when a
+dataset only has a `sky_mask` function. The in-place crop must decode exactly
+as the crop of the source labels. Files it cannot keep (JPEG, 16-bit colour
+PNGs, ambiguous array layouts) fall back to the writer with a warning. Labels
+are never interpolated: a `resize.interpolation` other than `nearest` for them
+is an error.
+
+Other rasters are re-encoded with the dataset's euler-loading writer, so a raster
 modality needs one (SeeingThroughFog's raw `rccb` TIFFs have none). Each
 encoded file is decoded again right away and must give back the cropped values:
 exactly, or for an interpolated resize within half an 8-bit step. A resize

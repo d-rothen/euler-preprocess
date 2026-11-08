@@ -24,6 +24,11 @@ When the crop also resizes, colour images (types ``rgb`` and ``rccb``) are
 interpolated bilinearly and every other raster (depth, masks, labels) takes the
 nearest source pixel, so no new depth or label values appear. Sparse-depth
 rasters cannot be resized: nearest sampling would drop points at random.
+
+Label rasters (semantic, instance and panoptic segmentation, sky masks) are
+ground truth whose classes all live in one file. They are cropped in the
+stored file (:mod:`euler_preprocess.crop.label_files`) and can only be resized
+with ``nearest``.
 """
 
 from __future__ import annotations
@@ -52,6 +57,16 @@ _COPY_DICT_TYPES = {"gnss", "sensor_timing"}
 _RESIZE_LAYOUTS = {"HW": "HW", "HWC": "HWC", "CHW": "CHW", "1HW": "CHW", "3HW": "CHW"}
 #: Raster types that are interpolated when resized; all others use nearest.
 INTERPOLATED_TYPES = {"rgb", "rccb"}
+#: Categorical raster types: their values are class, instance or segment IDs.
+LABEL_TYPES = frozenset(
+    {
+        "semantic_segmentation",
+        "semantic_segmentation_color",
+        "instance_segmentation",
+        "panoptic_segmentation",
+        "sky_mask",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +108,11 @@ class ModalityRole:
     def is_point_set(self) -> bool:
         return self.role == COPY and self.shape == "NC"
 
+    @property
+    def is_label(self) -> bool:
+        """A categorical raster: cropped in the stored file, resized only by nearest."""
+        return self.role == RASTER and self.modality_type in LABEL_TYPES
+
     def default_interpolation(self) -> str:
         return "bilinear" if self.modality_type in INTERPOLATED_TYPES else "nearest"
 
@@ -105,12 +125,21 @@ class ModalityRole:
                 f"Modality '{self.name}' is a sparse-depth raster and cannot be resized: "
                 "nearest sampling would drop points at random. Resize from point clouds instead."
             )
+        if self.is_label and interpolation not in (None, "nearest"):
+            raise ValueError(label_interpolation_error(self.name, self.modality_type, interpolation))
         return resize_raster(
             value,
             layout=_RESIZE_LAYOUTS[self.layout or ""],
             size=(height, width),
             interpolation=interpolation or self.default_interpolation(),
         )
+
+
+def label_interpolation_error(name: str, modality_type: str | None, interpolation: str) -> str:
+    return (
+        f"Modality '{name}' holds labels ({modality_type}) and can only be resized with "
+        f"'nearest', not {interpolation!r}: interpolating would invent class IDs"
+    )
 
 
 def describe_annotation(annotation: Mapping[str, Any] | None) -> str:
