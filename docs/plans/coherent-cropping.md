@@ -394,7 +394,9 @@ ground truth for every class, the sky included:
 - Labels are never interpolated.
 
 euler-view's crop addon offers `semantic_segmentation` instead of `sky_mask`,
-which is only a model output. Depth PNGs (§7.3) could use the same path later.
+which is only a model output. RGB is optional in the addon: the crop's
+`reference` is the first included of RGB, depth and semantic segmentation, so
+a single modality (e.g. the semantic GT) can be cropped on its own. Depth PNGs (§7.3) could use the same path later.
 
 **MUSES lidar needs motion compensation.** The sensor is not a spinning lidar.
 It scans a ~124° × 25° forward window top to bottom in 84.5 ms: point
