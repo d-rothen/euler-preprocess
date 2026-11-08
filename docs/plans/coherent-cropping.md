@@ -245,7 +245,7 @@ modality name, which is what causes the hazard in §1.
 
 | Annotated shape | Role | Operation |
 |---|---|---|
-| `HW`, `1HW`, `HWC`, `CHW`, `3HW` | raster | Slice with the box; must match the reference H×W, else error |
+| `HW`, `1HW`, `HWC`, `CHW`, `3HW` | raster | Slice with the box; must match the reference H×W, else error. Label types (`semantic_segmentation`, `semantic_segmentation_color`, `instance_segmentation`, `panoptic_segmentation`, `sky_mask`) are cropped in the stored file (2026-11-08) |
 | `NC` | point set | Byte copy (`prune_to_crop` later) |
 | `3x3` with type `intrinsics` | intrinsics | `K' = crop_intrinsics(K, top, left)` |
 | `4x4`, `Nx1` | extrinsics | Byte copy (patched copy where the file also holds K) |
@@ -383,7 +383,18 @@ euler-preprocess:
 
 Also in phase 2: a format-level raster crop (PNG/TIFF via Pillow, NPY/NPZ via
 NumPy, preserving mode, dtype and keys) for formats whose writers are missing or
-lossy.
+lossy. **Done for label rasters** (2026-11-08,
+`euler_preprocess/crop/label_files.py`), since a semantic segmentation is the
+ground truth for every class, the sky included:
+- The stored pixels are sliced, and for a resize the source pixels are picked
+  with euler-loading's own nearest indices, in the same mode, palette and
+  format.
+- The result must decode exactly as the crop of the decoded source.
+- Unsupported files fall back to the writer.
+- Labels are never interpolated.
+
+euler-view's crop addon offers `semantic_segmentation` instead of `sky_mask`,
+which is only a model output. Depth PNGs (§7.3) could use the same path later.
 
 **MUSES lidar needs motion compensation.** The sensor is not a spinning lidar.
 It scans a ~124° × 25° forward window top to bottom in 84.5 ms: point

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- `crop` crops label rasters in the stored file: semantic segmentation (the
+  ground truth that also holds the sky), instance and panoptic segmentation,
+  and sky masks.
+  - PNG, TIFF and BMP keep their mode, palette, bit depth and every channel;
+    `.npy`/`.npz` keep their dtype and other arrays.
+  - The result must decode exactly as the crop of the source labels.
+  - So no class is lost to a writer that re-encodes only what one loader
+    function returns: Real Drive Sim's non-red channels, or every class but
+    the sky for a dataset read through `sky_mask`. Label modalities no longer
+    need a writer.
+  - Files that cannot be kept (JPEG, 16-bit colour PNGs) are re-encoded with
+    the writer, with a warning.
+  - Labels can only be resized with `nearest`; another `resize.interpolation`
+    for them is an error.
+
 - `crop` supports MUSES (with euler-loading 2.35.0's MUSES writers):
   - `calib.json` holds the frame camera's `K` and every extrinsic. The
     `intrinsics` modality patches it once, and every other modality indexing

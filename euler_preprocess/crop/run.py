@@ -6,7 +6,9 @@ the output size. The pixel-grid change is ``S @ C`` (crop ``C``, then the
 
 - rasters are sliced, resized if requested, and re-encoded with the dataset's
   own writer; every encoded file is decoded again and must reproduce the
-  values (exactly, or to half an 8-bit step when interpolated);
+  values (exactly, or to half an 8-bit step when interpolated). Label rasters
+  (semantic segmentation and the like) are cropped in the stored file instead,
+  keeping every class, channel and palette, and must decode exactly;
 - pinhole intrinsics become ``K' = S @ C @ K``, merged into a copy of their
   source file;
 - extrinsics and lidar point clouds are unchanged: ``u' = S @ C @ K @ [R|t] @ X``
@@ -53,6 +55,7 @@ from euler_preprocess.common.output import (
     write_pipeline_outputs_manifest,
 )
 from euler_preprocess.crop.calibration import HierarchicalFiles
+from euler_preprocess.crop.label_files import crop_label_file, source_grid
 from euler_preprocess.crop.files import (
     SourceFiles,
     byte_digest,
@@ -66,6 +69,7 @@ from euler_preprocess.crop.roles import (
     RASTER,
     ModalityRole,
     infer_role,
+    label_interpolation_error,
     loader_annotation,
 )
 from euler_preprocess.crop.spec import CropBox, CropConfig, parse_crop_config
@@ -230,6 +234,11 @@ class CropRunner:
         self.prune = config.point_clouds == "prune_to_crop"
         self.projection = self._projection_modalities() if self.prune else None
 
+        for name, role in self.roles.items():
+            override = config.interpolation_override(name)
+            if role.is_label and override not in (None, "nearest"):
+                raise ValueError(label_interpolation_error(name, role.modality_type, override))
+
         writers: dict[str, Any] = {}
         for name, role in self.roles.items():
             if not (role.role in (RASTER, INTRINSICS) or (self.prune and role.is_point_set)):
@@ -237,6 +246,9 @@ class CropRunner:
             try:
                 writers[name] = dataset.get_writer(name)
             except (KeyError, ValueError):
+                if role.is_label:
+                    # Label files are cropped in place; a writer is only the fallback.
+                    continue
                 what = "pruned points" if role.is_point_set else "cropped values"
                 raise ValueError(
                     f"Modality '{name}' ({role.role}) has no euler-loading writer, so its "
@@ -273,6 +285,8 @@ class CropRunner:
         self._patched: dict[str, PatchedFile] = {}
         self._copied: dict[str, str] = {}
         self._shares_logged: set[str] = set()
+        self._grids: dict[CropBox, tuple[np.ndarray, np.ndarray]] = {}
+        self._label_fallbacks: set[str] = set()
         self.expectations: dict[tuple[str, str], Expectation] = {}
         self.files_written: Counter[str] = Counter()
         self.points: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -371,6 +385,11 @@ class CropRunner:
         ``tolerance=None`` requires an exact round trip.
         """
         backend = self.backends[name]
+        if backend.modality_writer is None:
+            raise ValueError(
+                f"Modality '{name}' file {entry['path']!r} cannot be cropped in place and has no "
+                "euler-loading writer to re-encode it"
+            )
         basename = Path(str(entry["path"])).name
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / basename
@@ -395,6 +414,41 @@ class CropRunner:
                 f"with different values{' beyond the quantization tolerance' if tolerance else ''}"
             )
         return data, fingerprint(reloaded)
+
+    def _crop_label_file(
+        self, name: str, entry: Mapping[str, Any], expected: Any, box: CropBox, attributes: Mapping[str, Any]
+    ) -> tuple[bytes | None, str]:
+        """Crop a label file in place; return its bytes and decoded fingerprint, or ``None`` to re-encode it.
+
+        The result must decode, through the modality's own loader, exactly as
+        *expected* (the crop of the decoded source).
+        """
+        grid = self._grids.get(box)
+        if grid is None:
+            grid = self._grids[box] = source_grid(box)
+        source = self.sources.read(name, entry)
+        data = crop_label_file(source, str(entry["path"]), *grid, (box.source_height, box.source_width))
+        reason = "its format cannot be cropped in place without loss"
+        if data is not None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / Path(str(entry["path"])).name
+                path.write_bytes(data)
+                decoded = self._decode(name, path, entry, {**(entry.get("attributes") or {}), **attributes})
+            digest = fingerprint(decoded)
+            if digest == fingerprint(expected):
+                return data, digest
+            reason = "cropped in place it does not decode as the cropped labels"
+        if name not in self._label_fallbacks:
+            self._label_fallbacks.add(name)
+            self.logger.warning(
+                "crop: '%s' file %s: %s; re-encoding '%s' with its euler-loading writer, which keeps "
+                "the decoded labels but not necessarily the file's palette, bit depth or other channels",
+                name,
+                entry["path"],
+                reason,
+                name,
+            )
+        return None, ""
 
     def _tolerance(self, role: ModalityRole, interpolation: str) -> float | None:
         if interpolation == "nearest":
@@ -520,9 +574,13 @@ class CropRunner:
             if box.resized:
                 interpolation = self.config.interpolation_override(name) or role.default_interpolation()
                 cropped = role.resize(cropped, box.output_height, box.output_width, interpolation)
-            data, digest = self._encode(
-                name, entry, cropped, attributes, tolerance=self._tolerance(role, interpolation)
-            )
+            data: bytes | None = None
+            if role.is_label:
+                data, digest = self._crop_label_file(name, entry, cropped, box, attributes)
+            if data is None:
+                data, digest = self._encode(
+                    name, entry, cropped, attributes, tolerance=self._tolerance(role, interpolation)
+                )
             backend.copy_source(full_id, entry, data, attributes=attributes)
             expectation = Expectation("value", digest)
         elif role.role == INTRINSICS:
