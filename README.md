@@ -788,13 +788,25 @@ The crop config (`configs/crop_config.json`) describes the box relative to the
 | `point_clouds` | `keep` (default): copy every point, consumers clip to the image. `prune_to_crop`: keep only the points with `z > 0` whose pixel `rint(K'·T·X)` lies in the output image, as consumers such as dmd3c-euler project them |
 | `projection` | For `prune_to_crop`: the `intrinsics` and `extrinsics` modalities to project with, when the dataset has more than one candidate |
 | `verify` | `all` (default), `none`, or a sample count: reopen the outputs and check every file against the crop (rasters and pruned clouds as encoded, intrinsics to 1e-3 px, copies byte-identical) |
-| `roles` | Override a modality's kind with `raster` or `copy`, for loaders whose annotation the crop does not know |
+| `roles` | Override a modality's kind with `raster` or `copy`, for loaders whose annotation the crop does not know, or to copy an intrinsics file of another camera (e.g. MUSES `sensor: event`) instead of cropping it |
 
 Pixel units reproduce the official boxes exactly, e.g. `RGB2Gatedv2` is
 `{"remove": {"top": 202, "bottom": 54, "left": 280, "right": 360}, "unit": "pixel"}`.
 `configs/crop_stf_valid_region_config.json` removes the black border the
 SeeingThroughFog rectification leaves on `_lut` frames (top 34, bottom 46,
 left 16 px), keeping a fully valid 1904×944 image.
+
+MUSES keeps the frame camera's `K` and every extrinsic in one `calib.json`,
+indexed as `intrinsics`, `camera_extrinsics` (and `lidar_to_gnss`). The crop
+patches `intrinsics.rgb.K` once and writes that file for every modality that
+indexes it, also when it is indexed as separate byte-identical copies, so the
+bundle holds one `K`. `D`, the event camera and all extrinsics stay as they
+are. `configs/crop_muses_hood_config.json` cuts the engine hood off the
+1920×1080 frame camera images: the bottom 160 rows, leaving 1920×920. Rows come
+off the bottom only, so `K` and every `calib.json` stay byte-identical. Run
+`lidar-motion` first and crop its output (`configs/crop_muses_dataset_config.json`).
+GNSS records and `meta.json` sensor timing are copied unchanged, like the
+extrinsics. MUSES label images (semantic, panoptic, sky) are sliced like the RGB.
 
 Rasters are re-encoded with the dataset's euler-loading writer, so a raster
 modality needs one (SeeingThroughFog's raw `rccb` TIFFs have none). Each

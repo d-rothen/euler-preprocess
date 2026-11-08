@@ -3,7 +3,8 @@
 Status: **phases 1 and 3 implemented** (2026-11-07) as `euler-preprocess crop`
 (plus `crop-box`), for **SeeingThroughFog** (euler-loading's `princeton_dense`
 loader) with `rgb`, `sparse_depth`, `intrinsics` and `camera_extrinsics`; see §5
-for results. Phase 2 (other datasets) is open. The euler-loading side shipped in
+for results. Phase 2 (other datasets): **MUSES implemented** (2026-11-08, §5,
+including the engine-hood crop); the rest is open. The euler-loading side shipped in
 2.31.0 (STF fixes) and 2.32.0 (MUSES inputs); phase 3 uses euler-loading 2.33.0
 and ds-crawler 2.14.0 (both released), which euler-preprocess now requires.
 euler-view launches it with the `euler-preprocess-crop` addon. Written 2026-11-06 against
@@ -248,6 +249,7 @@ modality name, which is what causes the hazard in §1.
 | `NC` | point set | Byte copy (`prune_to_crop` later) |
 | `3x3` with type `intrinsics` | intrinsics | `K' = crop_intrinsics(K, top, left)` |
 | `4x4`, `Nx1` | extrinsics | Byte copy (patched copy where the file also holds K) |
+| `dict` with type `gnss` / `sensor_timing` | copy | Byte copy (MUSES side data) |
 | `dict` (Real Drive Sim `calibration`) | calibration map | Phase 2 |
 | anything else | — | Error; override with `"roles": {"<name>": "raster" \| "copy"}` |
 
@@ -372,7 +374,7 @@ euler-preprocess:
 
 | Dataset | Missing |
 |---|---|
-| `muses` | `write_rgb`; merge `write_intrinsics` for `calib.json` `intrinsics[sensor].K`; extrinsics output = patched `calib.json`. The lidar must be ego-motion compensated first (see below). |
+| `muses` | Done (2026-11-08, see "MUSES crop" below). |
 | `real_drive_sim` | Merge `write_intrinsics` for the calibration JSON (`CS_FRONT` fx/fy/cx/cy; `fov` is the horizontal FOV for 2048 px, so recompute or drop it); extrinsics output = patched file; RGBA sources become RGB PNGs |
 | `vkitti2` | `write_intrinsics` must keep every frame/camera row (it writes one today); `read_extrinsics` header bug (§7) |
 | `synscapes` | Nothing new (merge writers exist; pass `resx`/`resy`); extrinsics output = patched meta JSON |
@@ -435,6 +437,76 @@ loaders.
 
 The side data stays with the local dataset: MUSES license §2.3 forbids
 distributing it.
+
+### MUSES crop — implemented 2026-11-08
+
+euler-loading (unreleased, for 2.35.0): MUSES writers for every image and
+calibration modality.
+- `write_rgb` / `write_reference_rgb`: 8-bit PNG, a bit-exact round trip on
+  real frames.
+- `write_semantic_segmentation`, `write_semantic_segmentation_color`,
+  `write_panoptic_segmentation` and `write_sky_mask`.
+- `write_intrinsics` updates `intrinsics[<sensor>].K` in `calib.json` like
+  `princeton_dense.write_intrinsics`: only a crop or rescale of the stored `K`,
+  applied to its float64 values. It keeps `D`, the event camera and all
+  extrinsics, and does not rewrite an unchanged matrix. The crop/rescale check
+  is now shared (`_writer_utils.pixel_grid_transform`).
+
+euler-preprocess:
+- A copied file whose source bytes equal a file an intrinsics modality
+  patched is written with the patched bytes. This covers MUSES `calib.json`
+  as `camera_extrinsics` / `lidar_to_gnss`, whether it is indexed in place
+  (metadata scopes) or as separate copies, so the bundle carries one `K`.
+- Each such copy is decoded again and must read as before.
+- Two intrinsics modalities patching one file differently are refused (copy
+  the event camera's view with `roles`).
+- Intrinsics are written first in each pass.
+- `dict` loaders of type `gnss` and `sensor_timing` are copied by default.
+- Configs: `configs/crop_muses_hood_config.json` and
+  `crop_muses_dataset_config.json`; the euler-view crop addon has a
+  `muses-hood` preset.
+
+**Engine hood.** Measured on the five sample frames (all REC0176, test/fog/day):
+- **Method.** The hood is rigid with the camera, so its silhouette is the
+  vertical edge that is strong in every frame. Take the per-column maximum of
+  the across-frame minimum of the blurred vertical luma gradient.
+- **Shape.** The silhouette is a dome over columns 216–1619. At its bottom
+  it reaches rows 1061 (column 250) and 1066 (column 1600). Its apex is at
+  **row 931–932, near column 915**.
+- **Consistency.** All five frames agree to ±1 px. Luma at the apex steps
+  from road (44–53) to hood (65–70) between rows 930 and 933.
+- **Crop.** Cutting the bottom 160 rows (1920×920 stay) leaves an 11-row
+  margin. The cut is free in lidar terms: the MUSES lidar's lowest return
+  projects to row 811–820 in the three frames with lidar, so no point lands in
+  rows 920–1079. Pruning drops only points outside the camera's horizontal
+  field of view (66.7 % kept).
+- **Divisibility.** For a /32 height, cut 184 rows (1920×896).
+- **Open.** These are frames of one recording out of 136. The camera is
+  calibrated once (`calib.json`), but a remount between recordings could
+  shift the hood by a few rows. Check frames from a few other recordings
+  (other days, night) before relying on the margin.
+
+Real data (three frames with motion-compensated lidar, the real `calib.json`):
+- the CLI crop gives a bit-exact RGB slice;
+- `calib.json` for `intrinsics` and `camera_extrinsics` is byte-identical to
+  the source, since K is unchanged;
+- verification passes in both point-cloud modes.
+
+Real data, general crop (top 40, bottom 160, left 24, right 8, then 0.5x):
+`K' = S·C·K` to 1e-9, with both `calib.json` outputs identical, `D`, the event
+camera and the extrinsics kept, and verification passing.
+
+Tests: euler-loading 1038 passed (15 new writer tests); euler-preprocess 298
+passed. The MUSES-format fixture covers:
+- the hood crop;
+- a general crop patching `calib.json` for three modalities;
+- pruning;
+- the event-camera conflict;
+- a scoped zip like the production `/data/muses.zip`;
+- the configs.
+
+The contract's loader evidence was refreshed (only source hashes and line
+numbers changed), and its ecosystem check passes.
 
 ### Phase 3 — implemented 2026-11-07
 

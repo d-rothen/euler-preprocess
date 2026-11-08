@@ -10,8 +10,15 @@ sliced like an image.
 | ``HW``, ``HWC``, ``CHW``, ``1HW``, ``3HW`` | raster | Slice with the crop box |
 | ``3x3`` with type ``intrinsics`` | intrinsics | ``K' = crop_intrinsics(K, top, left)`` |
 | ``NC`` (point sets), ``4x4`` / ``Nx1`` (extrinsics) | copy | Copy the file unchanged |
+| ``dict`` with type ``gnss`` or ``sensor_timing`` | copy | Copy the file unchanged |
 
-Anything else needs a ``roles`` override (``"raster"`` or ``"copy"``).
+Anything else needs a ``roles`` override (``"raster"`` or ``"copy"``). Other
+``dict`` loaders can hold pixel-grid values (Real Drive Sim's calibration map
+holds the camera matrix), so they are never copied by default.
+
+A copied file that an ``intrinsics`` modality also indexes (MUSES
+``calib.json`` holds the camera matrix and every extrinsic) is written as the
+patched file, so the output carries one camera matrix.
 
 When the crop also resizes, colour images (types ``rgb`` and ``rccb``) are
 interpolated bilinearly and every other raster (depth, masks, labels) takes the
@@ -38,6 +45,9 @@ RASTER_AXES: dict[str, tuple[int, int]] = {
     "3HW": (1, 2),
 }
 _COPY_SHAPES = {"NC", "4x4", "Nx1"}
+#: ``dict`` loaders whose values never refer to the image grid (MUSES GNSS
+#: records and ``meta.json`` sensor timing).
+_COPY_DICT_TYPES = {"gnss", "sensor_timing"}
 #: euler-loading's resize layouts for the annotated raster layouts.
 _RESIZE_LAYOUTS = {"HW": "HW", "HWC": "HWC", "CHW": "CHW", "1HW": "CHW", "3HW": "CHW"}
 #: Raster types that are interpolated when resized; all others use nearest.
@@ -152,7 +162,7 @@ def infer_role(
         return role(RASTER, shape)
     if shape == "3x3" and modality_type == "intrinsics":
         return role(INTRINSICS)
-    if shape in _COPY_SHAPES:
+    if shape in _COPY_SHAPES or (shape == "dict" and modality_type in _COPY_DICT_TYPES):
         return role(COPY)
     raise ValueError(
         f"Don't know how to crop modality '{name}' ({describe_annotation(annotation)}). "

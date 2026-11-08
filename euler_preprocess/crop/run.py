@@ -16,6 +16,12 @@ the output size. The pixel-grid change is ``S @ C`` (crop ``C``, then the
 
 Hierarchical files (shared calibration) are written once, after all samples,
 with the box of the samples using them.
+
+A file indexed by several modalities (MUSES ``calib.json`` is ``intrinsics``,
+``camera_extrinsics`` and ``lidar_to_gnss`` at once) is patched by its
+intrinsics modality, and every copied file with the same source bytes carries
+the patched bytes, so the output holds one camera matrix. Matching by content
+also covers a calibration file indexed as separate copies.
 """
 
 from __future__ import annotations
@@ -89,6 +95,15 @@ class Expectation:
 
     kind: str
     value: Any
+
+
+@dataclass(frozen=True)
+class PatchedFile:
+    """A source file an intrinsics modality patched, reused by copies of the same file."""
+
+    modality: str
+    data: bytes
+    box: CropBox
 
 
 @dataclass
@@ -177,6 +192,16 @@ def _accepts_attributes(loader: Any) -> bool:
     )
 
 
+def _comparable(value: Any) -> bool:
+    """Whether *value* is a numeric array or tensor that :func:`fingerprint` can compare."""
+    if value is None:
+        return False
+    try:
+        return to_numpy(value).dtype != object
+    except Exception:
+        return False
+
+
 def _select(value: Any, mask: np.ndarray) -> Any:
     if hasattr(value, "detach"):
         import torch
@@ -243,6 +268,11 @@ class CropRunner:
         self._boxes: dict[tuple[int, int], CropBox] = {}
         self._boxes_by_modality: dict[str, set[CropBox]] = defaultdict(set)
         self._seen_samples: set[str] = set()
+        #: Files patched by an intrinsics modality, and files copied unchanged,
+        #: by the digest of their source bytes.
+        self._patched: dict[str, PatchedFile] = {}
+        self._copied: dict[str, str] = {}
+        self._shares_logged: set[str] = set()
         self.expectations: dict[tuple[str, str], Expectation] = {}
         self.files_written: Counter[str] = Counter()
         self.points: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -381,6 +411,68 @@ class CropRunner:
 
     # -- writing --------------------------------------------------------------
 
+    def _write_order(self) -> list[str]:
+        """Modalities in config order, intrinsics first: copies of a patched file follow its patch."""
+        return sorted(self.roles, key=lambda name: self.roles[name].role != INTRINSICS)
+
+    def _remember_patch(
+        self, name: str, entry: Mapping[str, Any], source: bytes, patched: bytes, box: CropBox
+    ) -> None:
+        key = byte_digest(source)
+        other = self._patched.get(key)
+        if other is not None and other.data != patched:
+            raise ValueError(
+                f"Intrinsics modalities '{other.modality}' and '{name}' patch the same file "
+                f"({entry['path']!r}) differently. Crop it as one of them and copy it as the "
+                f'other (e.g. "roles": {{"{name}": "copy"}}), so it is patched once.'
+            )
+        copied = self._copied.get(key)
+        if copied is not None and patched != source:
+            raise ValueError(
+                f"Modality '{copied}' already copied {entry['path']!r} unchanged, but '{name}' "
+                "patches its camera matrix; the output would hold both versions"
+            )
+        self._patched.setdefault(key, PatchedFile(name, patched, box))
+
+    def _copy_bytes(
+        self, name: str, entry: Mapping[str, Any], value: Any, box: CropBox
+    ) -> tuple[bytes, str]:
+        """Return the bytes a copied file is stored with (the source, or its patched version) and their digest."""
+        data = self.sources.read(name, entry)
+        key = byte_digest(data)
+        patched = self._patched.get(key)
+        if patched is None or patched.data == data:
+            # Unpatched, or the patch changed nothing (e.g. a crop that keeps
+            # the principal point, like cutting rows off the bottom).
+            self._copied.setdefault(key, name)
+            return data, key
+        if patched.box != box:
+            raise ValueError(
+                f"Modalities '{patched.modality}' and '{name}' share the file {entry['path']!r} "
+                f"but get different crops ({patched.box.describe()} and {box.describe()})"
+            )
+        if _comparable(value):
+            # The patch may only change the camera matrix: what this modality
+            # reads from the file must stay as it was.
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / Path(str(entry["path"])).name
+                path.write_bytes(patched.data)
+                reloaded = self._decode(name, path, entry, entry.get("attributes") or {})
+            if fingerprint(reloaded) != fingerprint(value):
+                raise ValueError(
+                    f"Patching the camera matrix in {entry['path']!r} for '{patched.modality}' "
+                    f"changed what '{name}' reads from it; its writer must keep every other field"
+                )
+        if name not in self._shares_logged:
+            self._shares_logged.add(name)
+            self.logger.info(
+                "crop: '%s' indexes the file '%s' patches (%s); it is written patched",
+                name,
+                patched.modality,
+                Path(str(entry["path"])).name,
+            )
+        return patched.data, byte_digest(patched.data)
+
     def _intrinsics_meta(
         self, backend: SourceBackedOutputBackend, entry: Mapping[str, Any], box: CropBox
     ) -> dict[str, Any]:
@@ -456,14 +548,9 @@ class CropRunner:
                     source_size=(box.height, box.width),
                     target_size=(box.output_height, box.output_width),
                 )
-            backend.update_source(
-                full_id,
-                entry,
-                data,
-                cropped,
-                self._intrinsics_meta(backend, entry, box),
-                attributes=attributes,
-            )
+            patched = backend.updated_bytes(entry, data, cropped, self._intrinsics_meta(backend, entry, box))
+            self._remember_patch(name, entry, data, patched, box)
+            backend.copy_source(full_id, entry, patched, attributes=attributes)
             expectation = Expectation("intrinsics", cropped)
         elif self.prune and role.is_point_set and sample is not None:
             points = to_numpy(value)
@@ -480,9 +567,9 @@ class CropRunner:
             self.points[name][0] += int(len(mask))
             self.points[name][1] += int(mask.sum())
         else:
-            data = self.sources.read(name, entry)
+            data, digest = self._copy_bytes(name, entry, value, box)
             backend.copy_source(full_id, entry, data, attributes=attributes)
-            expectation = Expectation("bytes", byte_digest(data))
+            expectation = Expectation("bytes", digest)
 
         self.expectations[(name, full_id)] = expectation
         self.files_written[name] += 1
@@ -499,15 +586,15 @@ class CropRunner:
         reference = self.config.reference
         height, width = self.roles[reference].raster_size(sample[reference])
         box = self.box_for(height, width)
-        for name, role in self.roles.items():
-            if not role.hierarchical:
+        for name in self._write_order():
+            if not self.roles[name].hierarchical:
                 self._write(name, full_id, sample["meta"][name], sample[name], box, sample)
         self.hierarchical.add_sample(sample, box)
         return True
 
     def _write_hierarchical(self) -> None:
-        for name, role in self.roles.items():
-            if not role.hierarchical:
+        for name in self._write_order():
+            if not self.roles[name].hierarchical:
                 continue
             files = self.hierarchical.files(name)
             if not files:
