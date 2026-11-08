@@ -781,6 +781,7 @@ The crop config (`configs/crop_config.json`) describes the box relative to the
 
 | Key | Meaning |
 |---|---|
+| `reference` | The per-sample raster the box is relative to (default `rgb`). Any image-shaped modality works, so `"reference": "semantic_segmentation"` with only that modality in the dataset config crops the labels alone; other rasters must have its size |
 | `crop.remove` | What to cut off each edge (`top`, `bottom`, `left`, `right`) |
 | `crop.keep` + `crop.anchor` | The kept `height` / `width`, placed at `center` (default), `top`, `bottom`, `left`, `right`, `top_left`, `top_right`, `bottom_left` or `bottom_right` |
 | `crop.unit` | `fraction` (default) or `pixel`. Fractions lie in `[0, 1)` (`keep`: `(0, 1]`) and round half up per edge: `floor(f · size + 0.5)` |
