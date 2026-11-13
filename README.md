@@ -100,13 +100,17 @@ loader.
 
 | Transform | Required | Optional |
 |---|---|---|
-| `fog` | `rgb`, `depth`, `semantic_segmentation` | `intrinsics`; used for radial depth conversion and camera-profile optics |
+| `fog` | `rgb`, `depth` | `semantic_segmentation` (sky mask; without it no pixel is sky); `intrinsics`, used to convert planar depth to the distance along the ray and for camera-profile optics |
 | `sky-depth` | `depth`, `semantic_segmentation` | — |
 | `radial` | `depth`, `intrinsics` | — |
 | `lidar-motion` | `sparse_depth`, `gnss`, `sensor_timing`, `lidar_to_gnss` | — |
 
-`fog` and `sky-depth` need `semantic_segmentation` as a boolean sky mask. They load
-it with the `sky_mask` function of the euler-loading module that the index's
+`sky-depth` needs `semantic_segmentation` as a boolean sky mask, and `fog` uses one
+when it is configured. Without it, `fog` treats no pixel as sky, e.g. for indoor
+datasets: `from_sky` airlight falls back to white `[1, 1, 1]`, sky-only options
+(`sky_fog_path`, `sky_weight`, sky-aware metering) have no effect, and one warning
+per run says so. Both transforms load the mask
+with the `sky_mask` function of the euler-loading module that the index's
 dataset head names, so a `class_segmentation` index works as is: the sky is the
 head's `skyclass` (Synscapes `[23, 23, 23]`, Real Drive Sim `[29, 0, 0]`, VKITTI2
 `[90, 200, 255]`), and the log names the loader and the sky definition in use.
@@ -188,6 +192,7 @@ whole dataset.
 | `seed` | Random seed for reproducibility; `null` for non-deterministic. |
 | `depth_scale` | Multiplier applied to depth values after loading. |
 | `resize_depth` | Bilinearly resize the depth map to the RGB resolution. |
+| `planar_depth_as_distance` | `true` accepts planar depth without intrinsics as the distance along the ray, with one warning, instead of failing (see [How Each Modality Is Used](#how-each-modality-is-used)). Default `false`. |
 | `contrast_threshold` | Threshold *C_t* in the visibility-to-attenuation conversion (default `0.05`). |
 | `render_input_space` | Colour space of the input RGB. `"srgb"` for display-encoded images (fog is mixed in scene-linear RGB); `"linear"` for already-linear radiance. |
 | `mode` | `"sample"` (default) renders one sampled scenario per image; `"progressive"` renders every scenario step for every image. |
@@ -231,12 +236,28 @@ inf, negative) are clamped to zero, i.e. treated as infinitely close and receivi
 fog. Depth stays authoritative even where the semantic map says sky, unless
 `sky_fog_path` is configured.
 
-**Semantic Segmentation** — a per-pixel semantic map from which a boolean sky mask is
-derived. Used for airlight estimation when `airlight` is `"from_sky"`: the mean RGB of
-all sky pixels becomes *L_s*.
+Fog attenuates with the distance along each pixel's ray, so *d(x)* must be radial
+(Euclidean) distance. The depth's dataset head says which kind it holds in
+`modality.meta.radial_depth`, and the CLI logs what it found:
 
-**Intrinsics** *(optional)* — when present, planar (z-buffer) depth is converted to
-radial (Euclidean) depth before fog is applied.
+| Head declares | With intrinsics | Without intrinsics |
+|---|---|---|
+| `radial_depth: true` | Used as it is; the intrinsics never convert it | Used as it is |
+| `radial_depth: false` | Converted: `d * ‖K⁻¹ [u, v, 1]‖` (see [Radial Transform](#radial-transform)) | **Error**, unless the fog config sets `planar_depth_as_distance: true` (then one warning) |
+| nothing (the dataset contract requires it for the `depth` key, so e.g. older heads or other keys) | Converted | Used as it is |
+
+When the modality entry selects another loader `function` than the head names (e.g.
+Hypersim's planar `depth` index read with `radial_distance`), that function's own
+`radial_depth` annotation decides instead. Standalone `FogTransform(...)` use takes it
+as `depth_radial=True/False/None`; `None`, the default, keeps the last row.
+
+**Semantic Segmentation** *(optional)* — a per-pixel semantic map from which a boolean
+sky mask is derived. Used for airlight estimation when `airlight` is `"from_sky"`: the
+mean RGB of all sky pixels becomes *L_s*. Without it no pixel is sky (see
+[Dataset Config](#dataset-config)).
+
+**Intrinsics** *(optional)* — convert planar (z-buffer) depth to radial distance before
+fog is applied, as in the table above, and place camera-profile optics.
 
 For a bounded valley-fog treatment of sky, add `sky_fog_path` inside a model config:
 
@@ -265,7 +286,7 @@ this without intrinsics raises an error rather than silently falling back.
 
 | Method | Description |
 |---|---|
-| `from_sky` | Mean RGB of sky pixels. Falls back to white `[1, 1, 1]` when no sky pixels exist. |
+| `from_sky` | Mean RGB of sky pixels. Falls back to white `[1, 1, 1]` when no sky pixels exist; the first such sample is logged as a warning, later ones at debug level only. |
 | `dcp` | Dark Channel Prior — brightest pixel (by channel sum) among the top 0.1% darkest-channel pixels. |
 | `dcp_heuristic` | Robust DCP — pools the brighter half of the top 0.1% darkest-channel pixels; when sky pixels exist their brightest colours act as a chromaticity prior while DCP-derived luminance is preserved. |
 

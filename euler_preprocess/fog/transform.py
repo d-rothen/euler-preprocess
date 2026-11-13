@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -278,28 +279,43 @@ except ImportError:
 
 
 class FogTransform(Transform):
-    """Generate foggy versions of images from RGB + depth + semantic segmentation samples.
+    """Generate foggy versions of images from RGB + depth (+ sky mask) samples.
 
     Accepts an iterable of sample dicts (compatible with euler-loading's
     MultiModalDataset). Each sample must contain at minimum:
-        "rgb":                      np.ndarray (H, W, 3)
-        "depth":                    np.ndarray (H, W), float in meters
-        "semantic_segmentation":    np.ndarray (H, W), boolean sky mask
+        "rgb":        np.ndarray (H, W, 3)
+        "depth":      np.ndarray (H, W), float in meters
         "id":         str
-        "intrinsics": (3, 3) camera intrinsics matrix *K* (per-sample
-                      modality), or a dict with an ``"intrinsics"`` key
-                      mapping to *K* (hierarchical modality).
-                      When present, planar (z-buffer) depth is converted to
-                      radial (Euclidean) depth before fog is applied.
 
     Optional:
+        "semantic_segmentation":
+                    np.ndarray (H, W), boolean sky mask.  Without it no pixel
+                    is sky (one warning per run): ``from_sky`` airlight falls
+                    back to white and sky-only options have no effect.
+        "intrinsics": (3, 3) camera intrinsics matrix *K* (per-sample
+                    modality), or a dict with an ``"intrinsics"`` key
+                    mapping to *K* (hierarchical modality).  Converts planar
+                    (z-buffer) depth to the distance along the ray; see
+                    *depth_radial*.
         "full_id":  str -- hierarchical id from euler-loading (e.g.
                     "/Scene02/30-deg-right/Camera_0/00000").  When present,
                     the parent segments are used as subdirectories under the
                     model output folder so the dataset structure is preserved.
+
+    *depth_radial* is what the depth's dataset head declares in
+    ``radial_depth`` (the CLI passes it):
+
+    - ``True``: depth already holds distances along the ray and is never
+      converted, even when intrinsics are present.
+    - ``False``: planar depth, converted with the intrinsics; a sample
+      without intrinsics raises, unless the fog config sets
+      ``"planar_depth_as_distance": true`` (then one warning per run).
+    - ``None`` (undeclared): planar depth is converted when intrinsics are
+      present and used as it is otherwise, as before.
     """
 
-    REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth", "semantic_segmentation"}
+    REQUIRED_MODALITIES: ClassVar[set[str]] = {"rgb", "depth"}
+    OPTIONAL_MODALITIES: ClassVar[set[str]] = {"semantic_segmentation"}
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
     MODALITY_FUNCTIONS: ClassVar[dict[str, str]] = {"semantic_segmentation": "sky_mask"}
     SOURCE_MODALITY: ClassVar[str] = "rgb"
@@ -331,8 +347,12 @@ class FogTransform(Transform):
         suffix: str = "",
         output_backend: Any | None = None,
         output_backends: dict[str, Any] | None = None,
+        depth_radial: bool | None = None,
     ) -> None:
         self.config_path = Path(config_path)
+        if depth_radial is not None and not isinstance(depth_radial, bool):
+            raise ValueError("depth_radial must be True, False or None")
+        self.depth_radial = depth_radial
         if output_backends is not None:
             if "rgb" not in output_backends:
                 raise ValueError("output_backends must contain the primary 'rgb' slot")
@@ -360,6 +380,12 @@ class FogTransform(Transform):
         )
         self.depth_scale = float(self.config.get("depth_scale", 1.0))
         self.resize_depth_flag = bool(self.config.get("resize_depth", True))
+        planar_as_distance = self.config.get("planar_depth_as_distance", False)
+        if not isinstance(planar_as_distance, bool):
+            raise ValueError("planar_depth_as_distance must be a boolean")
+        self.planar_depth_as_distance = planar_as_distance
+        # Notes logged once per run (missing sky mask, depth handling).
+        self._logged_once: set[str] = set()
         self.augmentation_config: FogAugmentationConfig = parse_fog_augmentations(
             self.config
         )
@@ -425,8 +451,9 @@ class FogTransform(Transform):
         """Render fog for every sample and return the written output paths.
 
         Args:
-            samples: Iterable of dicts, each containing "rgb", "depth",
-                     "semantic_segmentation", and "id" keys.
+            samples: Iterable of dicts, each containing "rgb", "depth" and
+                     "id" keys, optionally "semantic_segmentation" and
+                     "intrinsics" (see the class docstring).
         """
         if self.use_gpu:
             return self._generate_fog_gpu(samples)
@@ -436,6 +463,68 @@ class FogTransform(Transform):
 
     def _configure_device(self) -> None:
         self.torch_device, self.use_gpu = configure_device(self.device)
+
+    def _log_once(self, key: str, level: int, message: str, *args: Any) -> None:
+        if key in self._logged_once:
+            return
+        self._logged_once.add(key)
+        self.logger.log(level, message, *args)
+
+    def _sky_mask(self, sample: dict, shape: tuple[int, int]) -> np.ndarray:
+        """The sample's boolean sky mask; all false without a segmentation."""
+        segmentation = sample.get("semantic_segmentation")
+        if segmentation is not None:
+            return normalize_sky_mask(segmentation)
+        self._log_once(
+            "no_sky_mask",
+            logging.WARNING,
+            "No 'semantic_segmentation' in the samples: no pixel is treated as "
+            "sky. Airlight 'from_sky' falls back to white [1, 1, 1], and "
+            "sky-only options (sky_fog_path, sky_weight, sky-aware metering) "
+            "have no effect. Logged once per run.",
+        )
+        return np.zeros(shape, dtype=bool)
+
+    def _radial_intrinsics(
+        self, intrinsics: np.ndarray | None, sample: dict
+    ) -> np.ndarray | None:
+        """The intrinsics that turn this sample's depth into distance along the ray.
+
+        ``None`` means the depth is used as it is. Fog attenuates with the
+        distance along the ray, so planar depth must be converted; see the
+        class docstring for how :attr:`depth_radial` decides.
+        """
+        if self.depth_radial is True:
+            if intrinsics is not None:
+                self._log_once(
+                    "radial_with_intrinsics",
+                    logging.INFO,
+                    "Depth declares radial_depth: true; it is used as the "
+                    "distance along the ray and the intrinsics do not convert "
+                    "it.",
+                )
+            return None
+        if intrinsics is not None:
+            return intrinsics
+        if self.depth_radial is False:
+            if not self.planar_depth_as_distance:
+                raise ValueError(
+                    "Depth declares radial_depth: false (planar z-depth), but "
+                    f"sample {sample.get('full_id') or sample.get('id')!r} has no "
+                    "intrinsics to convert it to the distance along the ray that "
+                    "fog attenuates with. Add the camera's 'intrinsics' modality, "
+                    "use a depth modality whose head declares radial_depth: true, "
+                    'or set "planar_depth_as_distance": true in the fog config '
+                    "to accept planar depth as distance."
+                )
+            self._log_once(
+                "planar_as_distance",
+                logging.WARNING,
+                "Depth declares radial_depth: false and there are no intrinsics; "
+                "planar depth is used as distance (planar_depth_as_distance: "
+                "true), which underestimates the fog away from the optical axis.",
+            )
+        return None
 
     def _rng_for(self, sample_index: int, augmentation_index: int | None = None):
         if self.seed is not None:
@@ -1361,10 +1450,11 @@ class FogTransform(Transform):
                 depth = np.maximum(depth, 0.0)
 
                 intrinsics = extract_intrinsics(sample)
-                if intrinsics is not None:
-                    depth = planar_to_radial_depth(depth, intrinsics)
+                radial_intrinsics = self._radial_intrinsics(intrinsics, sample)
+                if radial_intrinsics is not None:
+                    depth = planar_to_radial_depth(depth, radial_intrinsics)
 
-                sky_mask = normalize_sky_mask(sample["semantic_segmentation"])
+                sky_mask = self._sky_mask(sample, rgb.shape[:2])
 
                 for step in self.progressive_scenario_steps:
                     rng = self._rng_for_progressive(
@@ -1441,10 +1531,11 @@ class FogTransform(Transform):
                 depth = np.maximum(depth, 0.0)
 
                 intrinsics = extract_intrinsics(sample)
-                if intrinsics is not None:
-                    depth = planar_to_radial_depth(depth, intrinsics)
+                radial_intrinsics = self._radial_intrinsics(intrinsics, sample)
+                if radial_intrinsics is not None:
+                    depth = planar_to_radial_depth(depth, radial_intrinsics)
 
-                sky_mask = normalize_sky_mask(sample["semantic_segmentation"])
+                sky_mask = self._sky_mask(sample, rgb.shape[:2])
 
                 if self.augmentation_specs:
                     for aug_index, augmentation in enumerate(self.augmentation_specs):
@@ -1805,6 +1896,7 @@ class FogTransform(Transform):
                         sample["depth"], rgb.shape[:2], self.resize_depth_flag
                     )
                     intrinsics = extract_intrinsics(sample)
+                    radial_intrinsics = self._radial_intrinsics(intrinsics, sample)
                     if self.seed is not None:
                         rng = np.random.default_rng(
                             np.random.SeedSequence([self.seed, global_index])
@@ -1820,9 +1912,8 @@ class FogTransform(Transform):
                             "rgb": rgb,
                             "depth": depth,
                             "intrinsics": intrinsics,
-                            "sky_mask": normalize_sky_mask(
-                                sample["semantic_segmentation"]
-                            ),
+                            "radial_intrinsics": radial_intrinsics,
+                            "sky_mask": self._sky_mask(sample, rgb.shape[:2]),
                             "rng": rng,
                             "model_name": plan.model_name,
                             "model_cfg": plan.model_cfg,
@@ -1886,7 +1977,7 @@ class FogTransform(Transform):
                                 depth_t * self.depth_scale,
                                 min=0.0,
                             )
-                            K_np = item.get("intrinsics")
+                            K_np = item.get("radial_intrinsics")
                             if K_np is not None:
                                 K_t = torch.from_numpy(K_np).to(
                                     device=device,
@@ -2006,7 +2097,7 @@ class FogTransform(Transform):
                             device=device, dtype=torch.float32
                         )
                         depth_t = torch.clamp(depth_t * self.depth_scale, min=0.0)
-                        K_np = item.get("intrinsics")
+                        K_np = item.get("radial_intrinsics")
                         if K_np is not None:
                             K_t = torch.from_numpy(K_np).to(
                                 device=device,
@@ -2115,14 +2206,15 @@ class FogTransform(Transform):
                 )
                 depth_t = torch.clamp(depth_t * self.depth_scale, min=0.0)
                 intrinsics = extract_intrinsics(sample)
-                if intrinsics is not None:
-                    K_t = torch.from_numpy(intrinsics).to(
+                radial_intrinsics = self._radial_intrinsics(intrinsics, sample)
+                if radial_intrinsics is not None:
+                    K_t = torch.from_numpy(radial_intrinsics).to(
                         device=device,
                         dtype=torch.float32,
                     )
                     depth_t = planar_to_radial_depth_torch(depth_t, K_t)
 
-                sky_mask_np = normalize_sky_mask(sample["semantic_segmentation"])
+                sky_mask_np = self._sky_mask(sample, rgb_np.shape[:2])
                 sky_mask_t = torch.from_numpy(sky_mask_np).to(
                     device=device,
                     dtype=torch.bool,
@@ -2227,14 +2319,15 @@ class FogTransform(Transform):
                 )
                 depth_t = torch.clamp(depth_t * self.depth_scale, min=0.0)
                 intrinsics = extract_intrinsics(sample)
-                if intrinsics is not None:
-                    K_t = torch.from_numpy(intrinsics).to(
+                radial_intrinsics = self._radial_intrinsics(intrinsics, sample)
+                if radial_intrinsics is not None:
+                    K_t = torch.from_numpy(radial_intrinsics).to(
                         device=device,
                         dtype=torch.float32,
                     )
                     depth_t = planar_to_radial_depth_torch(depth_t, K_t)
 
-                sky_mask_np = normalize_sky_mask(sample["semantic_segmentation"])
+                sky_mask_np = self._sky_mask(sample, rgb_np.shape[:2])
                 sky_mask_t = torch.from_numpy(sky_mask_np).to(
                     device=device,
                     dtype=torch.bool,

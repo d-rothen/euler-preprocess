@@ -13,7 +13,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from euler_preprocess.common.dataset import build_dataset
+from euler_preprocess.common.dataset import build_dataset, declared_radial_depth
 from euler_preprocess.common.logging import get_logger, log_dataset_info
 from euler_preprocess.common.output import prepare_output_backends
 
@@ -186,6 +186,7 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         required_modalities,
         required_hierarchical,
         transform_class.MODALITY_FUNCTIONS,
+        optional_modalities=getattr(transform_class, "OPTIONAL_MODALITIES", None),
     )
     output_backends = prepare_output_backends(config, dataset, transform_class)
     primary_backend = next(iter(output_backends.values()))
@@ -222,6 +223,14 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
                 transform_class.__name__,
                 extra,
             )
+    if "depth_radial" in init_params and "depth" in dataset.modality_paths():
+        depth_radial, source = declared_radial_depth(dataset, "depth")
+        logger.info(
+            "Depth: radial_depth=%s (from the %s)",
+            "undeclared" if depth_radial is None else str(depth_radial).lower(),
+            source,
+        )
+        transform_kwargs["depth_radial"] = depth_radial
     if "strict" in init_params:
         transform_kwargs["strict"] = bool(getattr(args, "strict", False))
     elif getattr(args, "strict", False):

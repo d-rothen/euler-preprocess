@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from euler_preprocess.common.sampling import sample_value
-from euler_preprocess.fog.airlight_from_sky import AirlightFromSky
+from euler_preprocess.fog.airlight_from_sky import AirlightFromSky, NoSkyWarning
 from euler_preprocess.fog.dcp_airlight import DCPAirlight
 from euler_preprocess.fog.dcp_heuristic_airlight import DCPHeuristicAirlight
 from euler_preprocess.fog.models import (
@@ -41,6 +41,9 @@ class AtmosphericLightResolver:
             )
         self.method = method
         self.logger = logger or logging.getLogger("euler-preprocess.fog")
+        # One report for the whole run: the white fallback of every sample
+        # without sky pixels after the first is logged at debug level only.
+        self.no_sky_warning = NoSkyWarning()
         dcp_heuristic_config = (
             {} if dcp_heuristic_config is None else dcp_heuristic_config
         )
@@ -90,7 +93,12 @@ class AtmosphericLightResolver:
     ) -> "torch.Tensor":
         resolved_method = method or self.method
         if resolved_method == "from_sky":
-            return estimate_airlight_torch(rgb_t, sky_mask_t, sample_id=sample_id)
+            return estimate_airlight_torch(
+                rgb_t,
+                sky_mask_t,
+                sample_id=sample_id,
+                no_sky_warning=self.no_sky_warning,
+            )
         estimator = self._get_estimator_torch(resolved_method)
         if estimator is None:
             raise RuntimeError(
@@ -254,12 +262,7 @@ class AtmosphericLightResolver:
         ]
         if no_sky.any():
             for idx_ns in no_sky.nonzero(as_tuple=False):
-                i = int(idx_ns.item())
-                self.logger.warning(
-                    "No sky pixels in segmentation mask (sample %s); using "
-                    "default airlight fallback [1.0, 1.0, 1.0]",
-                    items[i]["sample_id"],
-                )
+                self.no_sky_warning(items[int(idx_ns.item())]["sample_id"])
             airlight[no_sky] = 1.0
         return airlight
 
@@ -268,7 +271,9 @@ class AtmosphericLightResolver:
         if estimator is not None:
             return estimator
         if method == "from_sky":
-            estimator = AirlightFromSky(sky_depth_threshold=0.0)
+            estimator = AirlightFromSky(
+                sky_depth_threshold=0.0, no_sky_warning=self.no_sky_warning
+            )
         elif method == "dcp":
             estimator = DCPAirlight()
         elif method == "dcp_heuristic":

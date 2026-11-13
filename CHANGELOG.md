@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- `fog` no longer requires `semantic_segmentation`. Without a sky mask no pixel
+  is sky: `from_sky` airlight falls back to white, sky-only options have no
+  effect, and one warning per run says so. A configured mask is joined and
+  used exactly as before. For indoor datasets such as Hypersim.
+- The white `from_sky` fallback for samples without sky pixels is logged as a
+  warning once per run, then at debug level, instead of once per sample and
+  fog variant.
+- `fog` reads the depth head's `radial_depth` (the CLI logs what it found):
+  - `true`: the depth is used as the distance along the ray, and intrinsics
+    never convert it again (before, a radial depth plus intrinsics was
+    converted twice, up to 1.9× too far for Hypersim's tilt-shift cameras).
+  - `false` without intrinsics: an error, instead of silently using planar
+    depth as distance. `"planar_depth_as_distance": true` in the fog config
+    accepts it with one warning.
+  - Undeclared: unchanged (converted when intrinsics are present).
+  - With a `function` override, the loader function's own `radial_depth`
+    annotation decides, e.g. Hypersim's `depth` index read with `radial_distance`.
+  - Standalone `FogTransform(...)` takes it as `depth_radial`.
+- Transforms can declare `OPTIONAL_MODALITIES`: per-sample inputs that anchor
+  the role inference like required ones when configured.
+
 - `crop` crops label rasters in the stored file: semantic segmentation (the
   ground truth that also holds the sky), instance and panoptic segmentation,
   and sky masks.

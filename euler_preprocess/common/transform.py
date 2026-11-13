@@ -15,7 +15,11 @@ class Transform(ABC):
     Required modalities:
         :attr:`REQUIRED_MODALITIES` are per-sample inputs (RGB, depth, masks);
         they are always joined per sample and anchor the role inference of
-        every other modality.  :attr:`REQUIRED_HIERARCHICAL_MODALITIES` are
+        every other modality.  :attr:`OPTIONAL_MODALITIES` are per-sample
+        inputs the transform can do without (fog's sky mask): a configured
+        one is joined and anchors the role inference like a required one;
+        otherwise the samples simply lack it.
+        :attr:`REQUIRED_HIERARCHICAL_MODALITIES` are
         further required inputs, such as camera intrinsics, that a dataset may
         store per sample or once per hierarchy level; their role is inferred
         from the ds-crawler indexes (see
@@ -35,6 +39,7 @@ class Transform(ABC):
     """
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = set()
+    OPTIONAL_MODALITIES: ClassVar[set[str]] = set()
     REQUIRED_HIERARCHICAL_MODALITIES: ClassVar[set[str]] = set()
     MODALITY_FUNCTIONS: ClassVar[dict[str, str]] = {}
     SOURCE_MODALITY: ClassVar[str | None] = None

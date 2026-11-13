@@ -399,14 +399,24 @@ def estimate_airlight_torch(
     image: "torch.Tensor",
     sky_mask: "torch.Tensor",
     sample_id: str | None = None,
+    *,
+    no_sky_warning=None,
 ) -> "torch.Tensor":
+    """Mean colour of the sky pixels, white ``[1, 1, 1]`` without any.
+
+    *no_sky_warning* (a :class:`~euler_preprocess.fog.airlight_from_sky.NoSkyWarning`)
+    reports the fallback; without one, every fallback logs a warning.
+    """
     if sky_mask.sum() == 0:
-        id_str = f" (sample {sample_id})" if sample_id else ""
-        _logger.warning(
-            "No sky pixels in segmentation mask%s; "
-            "using default airlight fallback [1.0, 1.0, 1.0]",
-            id_str,
-        )
+        if no_sky_warning is not None:
+            no_sky_warning(sample_id)
+        else:
+            id_str = f" (sample {sample_id})" if sample_id else ""
+            _logger.warning(
+                "No sky pixels in segmentation mask%s; "
+                "using default airlight fallback [1.0, 1.0, 1.0]",
+                id_str,
+            )
         return torch.ones(3, device=image.device, dtype=image.dtype)
     airlight_pixels = image[sky_mask]
     airlight = airlight_pixels.mean(dim=0)

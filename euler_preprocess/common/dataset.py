@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 
 from euler_preprocess.common.logging import get_logger
 
@@ -153,6 +154,7 @@ def build_dataset(
     required_modalities: set[str],
     required_hierarchical: set[str] | None = None,
     modality_functions: dict[str, str] | None = None,
+    optional_modalities: set[str] | None = None,
 ):
     """Build a ``MultiModalDataset`` from a config dict.
 
@@ -177,6 +179,10 @@ def build_dataset(
     e.g. ``sky_mask`` for a ``class_segmentation`` index; the sky then comes
     from the head's ``skyclass``.  A modality entry's own ``function`` key
     overrides it, and ``"function": null`` keeps the head's function.
+
+    *optional_modalities* (a transform's ``OPTIONAL_MODALITIES``) are
+    per-sample inputs the transform can do without.  When configured, they
+    anchor the role inference exactly like required ones.
     """
     from euler_loading import MultiModalDataset, SamplePreprocessor
 
@@ -204,7 +210,10 @@ def build_dataset(
         name: _make_modality(entry, functions.get(name))
         for name, entry in configured.items()
     }
-    regular, hierarchical = _resolve_roles(modalities, set(required_modalities))
+    per_sample = set(required_modalities) | (
+        set(optional_modalities or ()) & configured.keys()
+    )
+    regular, hierarchical = _resolve_roles(modalities, per_sample)
     logger = get_logger()
     for name in regular:
         if name in raw_hierarchical:
@@ -222,3 +231,41 @@ def build_dataset(
         if config.get("preprocessing")
         else None,
     )
+
+
+def _head_loader_function(index: dict) -> str | None:
+    """The loader function a ds-crawler index's dataset head names, if any."""
+    try:
+        from euler_loading._resolution import _get_euler_loading_meta
+
+        addon = _get_euler_loading_meta(index)
+    except Exception:  # pragma: no cover - depends on the euler-loading version
+        addon = index.get("euler_loading") if isinstance(index, Mapping) else None
+    function = addon.get("function") if isinstance(addon, Mapping) else None
+    return function if isinstance(function, str) and function else None
+
+
+def declared_radial_depth(dataset, name: str = "depth") -> tuple[bool | None, str]:
+    """Whether modality *name* holds distances along the ray, as declared.
+
+    Returns ``(radial, source)``.  *radial* is the dataset head's
+    ``modality.meta.radial_depth``: ``True`` for the Euclidean distance to
+    the camera centre, ``False`` for planar z-depth, ``None`` when the head
+    does not declare it.  When the modality is read with another loader
+    function than the head names (a ``function`` override, e.g. Hypersim's
+    planar ``depth`` index read with ``radial_distance``), the head describes the
+    files but not the loaded values, so that function's own
+    ``radial_depth`` annotation is used if it has one.  *source* says where
+    the answer came from, for logging.
+    """
+    head_value = dataset.get_modality_metadata(name).get("radial_depth")
+    loader_name = getattr(dataset.get_loader(name), "__name__", None)
+    head_function = _head_loader_function(dataset.get_modality_index(name))
+    if head_function is not None and loader_name not in (None, head_function):
+        annotation = (dataset.get_loader_meta(name) or {}).get("meta") or {}
+        loader_value = annotation.get("radial_depth")
+        if isinstance(loader_value, bool):
+            return loader_value, f"loader function '{loader_name}'"
+    if isinstance(head_value, bool):
+        return head_value, "dataset head"
+    return None, "dataset head"
