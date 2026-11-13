@@ -50,8 +50,8 @@ def render_fog_image(
     *,
     rgb: Any,
     depth: Any,
-    semantic_segmentation: Any,
-    intrinsics: Any,
+    semantic_segmentation: Any = None,
+    intrinsics: Any = None,
     config_path: str | Path | None = None,
     config: Mapping[str, Any] | None = None,
     scenario_profile_name: str | None = None,
@@ -59,8 +59,12 @@ def render_fog_image(
     sample_id: str | None = None,
     sample_index: int = 0,
     sky_class: Sequence[int | float] | None = None,
+    depth_radial: bool | None = None,
 ) -> np.ndarray:
-    """Render and return only the RGB image for one in-memory sample."""
+    """Render and return only the RGB image for one in-memory sample.
+
+    See :func:`render_fog_sample` for the arguments.
+    """
 
     return render_fog_sample(
         rgb=rgb,
@@ -74,6 +78,7 @@ def render_fog_image(
         sample_id=sample_id,
         sample_index=sample_index,
         sky_class=sky_class,
+        depth_radial=depth_radial,
     ).rgb
 
 
@@ -81,8 +86,8 @@ def render_fog_sample(
     *,
     rgb: Any,
     depth: Any,
-    semantic_segmentation: Any,
-    intrinsics: Any,
+    semantic_segmentation: Any = None,
+    intrinsics: Any = None,
     config_path: str | Path | None = None,
     config: Mapping[str, Any] | None = None,
     scenario_profile_name: str | None = None,
@@ -90,14 +95,27 @@ def render_fog_sample(
     sample_id: str | None = None,
     sample_index: int = 0,
     sky_class: Sequence[int | float] | None = None,
+    depth_radial: bool | None = None,
 ) -> FogInferenceResult:
     """Render fog/camera artifacts for a single in-memory sample.
 
-    The call accepts the four modalities used by :class:`FogTransform` without
-    requiring a dataset reader or output backend. ``semantic_segmentation`` may
-    be either a boolean sky mask or an RGB semantic label map; RGB maps are
-    converted using ``sky_class``, the map's sky colour as its dataset head
-    declares it in ``skyclass`` (e.g. ``[29, 0, 0]`` for Real Drive Sim).
+    The call accepts the modalities used by :class:`FogTransform` without
+    requiring a dataset reader or output backend, and treats them the same way
+    a ``euler-preprocess fog`` run does:
+
+    - ``semantic_segmentation`` (optional) may be either a boolean sky mask or
+      an RGB semantic label map; RGB maps are converted using ``sky_class``,
+      the map's sky colour as its dataset head declares it in ``skyclass``
+      (e.g. ``[29, 0, 0]`` for Real Drive Sim). Without it no pixel is sky.
+    - ``intrinsics`` (optional) is a ``(3, 3)`` matrix *K*, a mapping with an
+      ``"intrinsics"`` key, or ``{"fx", "fy", "cx", "cy"}``. It places the
+      camera-profile optics and the sky fog path, and converts planar depth
+      to the distance along the ray as ``depth_radial`` decides.
+    - ``depth_radial`` is what the depth's dataset head declares in
+      ``radial_depth``: ``True`` keeps the depth unconverted even with
+      intrinsics, ``False`` requires intrinsics (or
+      ``"planar_depth_as_distance": true`` in the config), ``None`` converts
+      when intrinsics are present. See :class:`FogTransform`.
     """
 
     if mode not in ("cpu", "gpu"):
@@ -115,6 +133,7 @@ def render_fog_sample(
         transform = FogTransform(
             config_path=str(resolved_config_path),
             out_path=str(tmp_path / "out"),
+            depth_radial=depth_radial,
         )
         return _render_with_transform(
             transform,
@@ -178,11 +197,17 @@ def _render_with_transform(
         transform.resize_depth_flag,
     )
     intrinsics_np = _normalize_intrinsics(intrinsics)
-    sky_mask = _normalize_semantic_sky_mask(
-        semantic_segmentation,
-        target_shape=rgb_np.shape[:2],
-        sky_class=sky_class,
-    )
+    # The transform's own rules: radial_depth decides whether the intrinsics
+    # convert the depth, and a missing sky mask means no pixel is sky.
+    radial_intrinsics = transform._radial_intrinsics(intrinsics_np, {"id": sample_id})
+    if semantic_segmentation is None:
+        sky_mask = transform._sky_mask({}, rgb_np.shape[:2])
+    else:
+        sky_mask = _normalize_semantic_sky_mask(
+            semantic_segmentation,
+            target_shape=rgb_np.shape[:2],
+            sky_class=sky_class,
+        )
 
     rng = transform._rng_for(sample_index)
     scenario = _select_scenario_profile(transform, scenario_profile_name)
@@ -199,6 +224,7 @@ def _render_with_transform(
             depth_np=depth_np,
             sky_mask=sky_mask,
             intrinsics_np=intrinsics_np,
+            radial_intrinsics=radial_intrinsics,
             plan=plan,
             rng=rng,
             sample_id=sample_id,
@@ -210,6 +236,7 @@ def _render_with_transform(
         depth_np=depth_np,
         sky_mask=sky_mask,
         intrinsics_np=intrinsics_np,
+        radial_intrinsics=radial_intrinsics,
         plan=plan,
         rng=rng,
         sample_id=sample_id,
@@ -245,14 +272,15 @@ def _render_cpu(
     rgb_np: np.ndarray,
     depth_np: np.ndarray,
     sky_mask: np.ndarray,
-    intrinsics_np: np.ndarray,
+    intrinsics_np: np.ndarray | None,
+    radial_intrinsics: np.ndarray | None,
     plan,
     rng: np.random.Generator,
     sample_id: str,
 ) -> FogInferenceResult:
     depth_m = np.maximum(depth_np * transform.depth_scale, 0.0)
-    if intrinsics_np is not None:
-        depth_m = planar_to_radial_depth(depth_m, intrinsics_np)
+    if radial_intrinsics is not None:
+        depth_m = planar_to_radial_depth(depth_m, radial_intrinsics)
 
     result = transform.pipeline.process_np(
         rgb=rgb_np,
@@ -284,7 +312,8 @@ def _render_gpu(
     rgb_np: np.ndarray,
     depth_np: np.ndarray,
     sky_mask: np.ndarray,
-    intrinsics_np: np.ndarray,
+    intrinsics_np: np.ndarray | None,
+    radial_intrinsics: np.ndarray | None,
     plan,
     rng: np.random.Generator,
     sample_id: str,
@@ -297,8 +326,8 @@ def _render_gpu(
     rgb_t = normalize_rgb_torch(rgb_np, device)
     depth_t = torch.from_numpy(depth_np).to(device=device, dtype=torch.float32)
     depth_t = torch.clamp(depth_t * transform.depth_scale, min=0.0)
-    if intrinsics_np is not None:
-        K_t = torch.from_numpy(intrinsics_np).to(device=device, dtype=torch.float32)
+    if radial_intrinsics is not None:
+        K_t = torch.from_numpy(radial_intrinsics).to(device=device, dtype=torch.float32)
         depth_t = planar_to_radial_depth_torch(depth_t, K_t)
 
     sky_mask_t = torch.from_numpy(sky_mask).to(device=device, dtype=torch.bool)
@@ -333,7 +362,9 @@ def _render_gpu(
     )
 
 
-def _normalize_intrinsics(intrinsics: Any) -> np.ndarray:
+def _normalize_intrinsics(intrinsics: Any) -> np.ndarray | None:
+    if intrinsics is None:
+        return None
     if isinstance(intrinsics, Mapping):
         if "intrinsics" in intrinsics:
             intrinsics = intrinsics["intrinsics"]
