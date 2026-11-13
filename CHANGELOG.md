@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- `configs/dense_gloomy_daylight_fog_camera.json` (`dense_gloomy_daylight_dashcam`):
+  - Lens distortion is off: `lens_distortion` is uniform 0..0 (was −0.012…0.006).
+    It moved the RGB up to 6 px at the image borders, but depth, segmentation
+    and sky masks keep the source grid (see `docs/open-issues.md`). Uniform
+    0..0 instead of a constant keeps every other per-batch draw unchanged.
+  - Droplets are off in `clear_high_visibility_daylight_reference`,
+    `light_haze_soft_overcast`, `moderate_gloomy_fog_nominal_camera` and
+    `underexposed_dense_gloom`: their `probability` is 0 (was 0.015–0.12;
+    `enabled` is unchanged). Droplets refract pixels by 0.8–3.2 px, which the
+    labels do not follow. `severe_low_contrast_sensor_stress` keeps 0.18.
+  - The `tone_map_lut` toe is lifted. Shadows and mid-tones now map to about
+    0.9× their linear input (0.2 → 0.181, was 0.028). Inputs from 0.733 up are
+    unchanged. With the old curve, foggy UrbanSyn frames averaged 0.08–0.20
+    sRGB, against 0.41–0.61 for real fog (ACDC), and near objects were black.
+    Now they average 0.29 (dense) to 0.37 (light haze). Exposure targets,
+    compensation and airlight dampening are unchanged, so dense fog is still
+    darker than haze.
 - `fog` no longer requires `semantic_segmentation`. Without a sky mask no pixel
   is sky: `from_sky` airlight falls back to white, sky-only options have no
   effect, and one warning per run says so. A configured mask is joined and
