@@ -52,6 +52,14 @@
   - With a `function` override, the loader function's own `radial_depth`
     annotation decides, e.g. Hypersim's `depth` index read with `radial_distance`.
   - Standalone `FogTransform(...)` takes it as `depth_radial`.
+- Single-sample inference (`render_fog_sample` / `render_fog_image`, used for
+  preview renders) follows the same rules as a run:
+  - `semantic_segmentation` and `intrinsics` are optional; without a sky mask
+    no pixel is sky.
+  - `depth_radial` (the depth head's `radial_depth`) decides whether the
+    intrinsics convert the depth, including the error for planar depth
+    without intrinsics and `planar_depth_as_distance`. Before, intrinsics
+    always converted it, so a radial depth was converted twice.
 - Transforms can declare `OPTIONAL_MODALITIES`: per-sample inputs that anchor
   the role inference like required ones when configured.
 

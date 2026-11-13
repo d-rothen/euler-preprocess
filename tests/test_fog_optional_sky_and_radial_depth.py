@@ -24,6 +24,8 @@ from euler_preprocess.cli import _run_transform
 from euler_preprocess.common.dataset import build_dataset, declared_radial_depth
 from euler_preprocess.common.intrinsics import planar_to_radial_depth
 from euler_preprocess.fog.airlight_from_sky import AirlightFromSky, NoSkyWarning
+from euler_preprocess.fog.inference import render_fog_image, render_fog_sample
+from euler_preprocess.fog.pipeline import FogProcessingPipeline
 from euler_preprocess.fog.transform import FogTransform
 
 try:
@@ -440,3 +442,123 @@ def _read(path: Path) -> np.ndarray:
     from PIL import Image
 
     return np.asarray(Image.open(path))
+
+
+# ---------------------------------------------------------------------------
+# 4. Single-sample inference (render_fog_sample / render_fog_image, the API
+#    behind preview renders) follows the same rules as a run
+# ---------------------------------------------------------------------------
+
+INFERENCE_CONFIG = {
+    "airlight": "from_sky",
+    "seed": 5,
+    "models": {"uniform": UNIFORM},
+    "selection": {"mode": "fixed", "model": "uniform"},
+}
+
+
+def _infer(**kwargs):
+    return render_fog_sample(
+        rgb=_rgb_map(), depth=_depth_map(), config=INFERENCE_CONFIG, mode="cpu", **kwargs
+    )
+
+
+@pytest.fixture
+def depth_spy(monkeypatch) -> list[np.ndarray]:
+    """The depths the CPU renderer receives."""
+    seen: list[np.ndarray] = []
+    original = FogProcessingPipeline.process_np
+
+    def spy(self, **kwargs):
+        seen.append(np.array(kwargs["depth_m"]))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(FogProcessingPipeline, "process_np", spy)
+    return seen
+
+
+class TestInference:
+    @pytest.mark.parametrize(
+        ("depth_radial", "with_intrinsics", "converted"),
+        [
+            (True, True, False),
+            (True, False, False),
+            (False, True, True),
+            (None, True, True),
+            (None, False, False),
+        ],
+    )
+    def test_cpu_distance(self, depth_spy, depth_radial, with_intrinsics, converted):
+        _infer(intrinsics=K if with_intrinsics else None, depth_radial=depth_radial)
+        expected = planar_to_radial_depth(_depth_map(), K) if converted else _depth_map()
+        assert len(depth_spy) == 1
+        np.testing.assert_allclose(depth_spy[0], expected, rtol=1e-6)
+
+    def test_radial_depth_with_intrinsics_renders_like_without(self):
+        with_k = _infer(intrinsics=K, depth_radial=True)
+        without_k = _infer(depth_radial=True)
+        legacy = _infer(intrinsics=K)
+        np.testing.assert_array_equal(with_k.rgb, without_k.rgb)
+        assert not np.array_equal(with_k.rgb, legacy.rgb)
+
+    def test_planar_depth_without_intrinsics_raises_unless_accepted(self):
+        with pytest.raises(ValueError, match="'preview' has no intrinsics"):
+            _infer(depth_radial=False, sample_id="preview")
+        accepted = render_fog_sample(
+            rgb=_rgb_map(),
+            depth=_depth_map(),
+            config={**INFERENCE_CONFIG, "planar_depth_as_distance": True},
+            depth_radial=False,
+        )
+        np.testing.assert_array_equal(accepted.rgb, _infer().rgb)
+
+    def test_depth_radial_must_be_a_bool_or_none(self):
+        with pytest.raises(ValueError, match="depth_radial must be True, False or None"):
+            _infer(depth_radial="yes")
+
+    def test_missing_sky_mask_renders_like_an_empty_one(self, caplog):
+        empty = _infer(semantic_segmentation=np.zeros((H, W), dtype=bool))
+        with caplog.at_level(logging.WARNING, logger=FOG_LOGGER):
+            without = _infer()
+        np.testing.assert_array_equal(without.rgb, empty.rgb)
+        assert any("No 'semantic_segmentation'" in r.getMessage() for r in caplog.records)
+
+    def test_sky_mask_is_still_used(self):
+        config = {
+            **INFERENCE_CONFIG,
+            "models": {"uniform": {**UNIFORM, "atmospheric_light": "from_sky"}},
+        }
+        sky = np.zeros((H, W), dtype=bool)
+        sky[:2] = True
+        kwargs = dict(rgb=_rgb_map(), depth=_depth_map(), config=config)
+        with_sky = render_fog_image(semantic_segmentation=sky, **kwargs)
+        without = render_fog_image(**kwargs)
+        assert not np.array_equal(with_sky, without)
+
+    @pytest.mark.skipif(torch is None, reason="torch not installed")
+    def test_torch_pathway_follows_the_same_rules(self, tmp_path):
+        # mode="gpu" needs an accelerator; run its torch pathway on the CPU
+        # device, as TestTorchPathways does for the transform.
+        from euler_preprocess.fog.inference import _render_with_transform
+
+        def gpu(name, depth_radial, intrinsics):
+            transform = _transform(tmp_path, name, depth_radial)
+            transform.torch_device = torch.device("cpu")
+            return _render_with_transform(
+                transform,
+                rgb=_rgb_map(),
+                depth=_depth_map(),
+                semantic_segmentation=None,
+                intrinsics=intrinsics,
+                scenario_profile_name=None,
+                mode="gpu",
+                sample_id="preview",
+                sample_index=0,
+                sky_class=None,
+            ).rgb
+
+        radial_with_k = gpu("a", True, K)
+        np.testing.assert_allclose(radial_with_k, gpu("b", True, None), atol=1e-6)
+        assert not np.allclose(radial_with_k, gpu("c", None, K), atol=1e-6)
+        with pytest.raises(ValueError, match="'preview' has no intrinsics"):
+            gpu("d", False, None)
