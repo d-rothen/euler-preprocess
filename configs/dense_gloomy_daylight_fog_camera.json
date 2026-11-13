@@ -60,8 +60,8 @@
         },
         "lens_distortion": {
           "dist": "uniform",
-          "min": -0.012,
-          "max": 0.006
+          "min": 0,
+          "max": 0
         },
         "bloom": {
           "enabled": true,
@@ -740,16 +740,16 @@
         },
         "tone_map_lut": [
           0,
-          0.006,
-          0.014,
-          0.028,
-          0.052,
-          0.09,
-          0.145,
-          0.22,
-          0.32,
-          0.45,
-          0.61,
+          0.059,
+          0.119,
+          0.181,
+          0.246,
+          0.312,
+          0.38,
+          0.449,
+          0.52,
+          0.59,
+          0.67,
           0.78,
           0.9,
           0.965,
@@ -1296,7 +1296,7 @@
           },
           "droplets": {
             "enabled": true,
-            "probability": 0.015,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,
@@ -1582,7 +1582,7 @@
           },
           "droplets": {
             "enabled": true,
-            "probability": 0.04,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,
@@ -1868,7 +1868,7 @@
           },
           "droplets": {
             "enabled": true,
-            "probability": 0.08,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,
@@ -2160,7 +2160,7 @@
           },
           "droplets": {
             "enabled": true,
-            "probability": 0.12,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,

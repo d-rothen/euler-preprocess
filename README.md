@@ -33,7 +33,9 @@ attenuation is scene-consistent rather than a flat overlay.*
 `configs/dense_gloomy_daylight_fog_camera.json`. Each profile samples fog density,
 airlight, exposure, sensor noise and compression together, so weather and camera
 response stay correlated. The last two are deliberately extreme low-light stress
-cases — their auto-exposure targets a mean luminance of ~0.1.*
+cases — their auto-exposure targets a mean luminance of ~0.1. The images predate the
+lifted tone-curve toe and the removal of lens distortion and droplets (see the
+CHANGELOG), so current output is brighter.*
 
 Both sets were rendered with `tools/run_fog_qualitative_samples.py`, which runs a
 folder of RGB/depth/segmentation samples through the transform and writes images for
@@ -478,6 +480,12 @@ Enable the recommended camera stack with `"capture": {"preset": "camera"}` (or
 
 `camera_profiles` holds reusable named versions of the same settings; see
 `configs/dense_gloomy_daylight_fog_camera.json` for a fully specified dashcam profile.
+
+> **Known issue:** lens distortion, droplets, chromatic aberration and depth
+> fringing move pixels in the RGB only. Depth, segmentation, sky masks and
+> intrinsics keep the source grid, so they no longer line up with the image.
+> Set these effects to zero when the outputs are used with geometric labels.
+> See [docs/open-issues.md](docs/open-issues.md).
 
 Four opt-in `sensor` blocks cover most of the realism tuning:
 
