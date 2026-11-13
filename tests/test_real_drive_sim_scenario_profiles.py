@@ -40,6 +40,8 @@ SCENARIO_ORDER = (
     "severe_low_contrast_sensor_stress",
 )
 LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+# Minimum mean-luma gap between brightness tiers (light fog, moderate, gloom).
+LUMA_TIER_MARGIN = 0.03
 
 
 @pytest.fixture(scope="session")
@@ -153,12 +155,22 @@ def test_dense_gloomy_scenario_profiles_render_real_drive_sim_samples(
             metrics["clear_weather_camera_reference"]["opacity_mean"] + 0.25
         )
 
-        assert metrics["underexposed_dense_gloom"]["luma_mean"] < (
-            metrics["moderate_gloomy_fog_nominal_camera"]["luma_mean"] * 0.75
+        # Brightness falls in three tiers as fog thickens and exposure drops:
+        # light fog > moderate gloom > dense/severe gloom. The clear reference
+        # has no fog and follows the scene, so it is not ranked. Absolute
+        # margins replace ratios that were tuned to the old, crushed LUT toe.
+        luma = {name: metrics[name]["luma_mean"] for name in SCENARIO_ORDER}
+        light_fog = min(
+            luma["clear_high_visibility_daylight_reference"],
+            luma["light_haze_soft_overcast"],
         )
-        assert metrics["severe_low_contrast_sensor_stress"]["luma_mean"] < (
-            metrics["clear_weather_camera_reference"]["luma_mean"] * 0.65
+        moderate = luma["moderate_gloomy_fog_nominal_camera"]
+        gloom = max(
+            luma["underexposed_dense_gloom"],
+            luma["severe_low_contrast_sensor_stress"],
         )
+        assert light_fog > moderate + LUMA_TIER_MARGIN, {sample["id"]: luma}
+        assert moderate > gloom + LUMA_TIER_MARGIN, {sample["id"]: luma}
         chromatically_bounded_profiles = SCENARIO_ORDER[:4]
         assert all(
             0.75 <= metrics[name]["blue_red_ratio"] <= 1.65

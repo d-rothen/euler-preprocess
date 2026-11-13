@@ -60,16 +60,30 @@ def test_dense_gloomy_daylight_config_activates_realism_stack() -> None:
         "clear_weather_camera_reference",
     )
     assert clear["clear_weather"] is True
-    assert clear["weight"] == 0.1
+    assert clear["weight"] == 0.15
     assert clear["model"] == "uniform"
     high_visibility = _profile_by_name(
         config["scenario_profiles"],
         "clear_high_visibility_daylight_reference",
     )
     assert high_visibility.get("clear_weather", False) is False
-    assert high_visibility["weight"] == 0.09
+    assert high_visibility["weight"] == 0.2
     assert high_visibility["model"] == "heterogeneous_k_ls"
-    assert sum(scenario["weight"] for scenario in config["scenario_profiles"]) == 1.0
+    # The sampler normalizes the weights. The stress profile stays defined but
+    # is never sampled.
+    assert all(scenario["weight"] >= 0.0 for scenario in config["scenario_profiles"])
+    assert sum(scenario["weight"] for scenario in config["scenario_profiles"]) > 0.0
+    severe = _profile_by_name(
+        config["scenario_profiles"],
+        "severe_low_contrast_sensor_stress",
+    )
+    assert severe["weight"] == 0.0
+
+    # Lens distortion and droplets move RGB pixels that depth and segmentation
+    # do not follow, so the profile ships with both off.
+    distortion = profile["optics"]["lens_distortion"]
+    assert distortion["min"] == distortion["max"] == 0.0
+    assert profile["optics"]["droplets"]["probability"] == 0.0
     underexposed_condition = _profile_by_name(
         profile["sensor"]["condition_profiles"],
         "underexposed_noisy",
@@ -101,6 +115,7 @@ def test_dense_gloomy_daylight_config_activates_realism_stack() -> None:
         weather_optics_enabled = not scenario.get("clear_weather", False)
         assert capture["optics"]["fog_coupled_glare"]["enabled"] is weather_optics_enabled
         assert capture["optics"]["droplets"]["enabled"] is weather_optics_enabled
+        assert capture["optics"]["droplets"]["probability"] == 0.0
         assert "tone_map_strength" in capture["isp"]
         assert "quality" in capture["transport"]["jpeg"]
 

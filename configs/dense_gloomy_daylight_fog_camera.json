@@ -5,8 +5,8 @@
   "resize_depth": true,
   "contrast_threshold": 0.05,
   "render_input_space": "srgb",
-  "device": "mps",
-  "gpu_batch_size": 4,
+  "device": "cuda",
+  "gpu_batch_size": 8,
   "gpu_batching": {
     "scenario_scope": "batch",
     "condition_parameter_scope": "batch"
@@ -107,7 +107,7 @@
         },
         "droplets": {
           "enabled": true,
-          "probability": 0.08,
+          "probability": 0,
           "count": {
             "dist": "uniform",
             "min": 2,
@@ -779,7 +779,7 @@
   "scenario_profiles": [
     {
       "name": "clear_weather_camera_reference",
-      "weight": 0.1,
+      "weight": 0.15,
       "clear_weather": true,
       "model": "uniform",
       "airlight_method": "dcp_heuristic",
@@ -1010,7 +1010,7 @@
           },
           "droplets": {
             "enabled": false,
-            "probability": 0.015,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,
@@ -1042,7 +1042,7 @@
     },
     {
       "name": "clear_high_visibility_daylight_reference",
-      "weight": 0.09,
+      "weight": 0.2,
       "model": "heterogeneous_k_ls",
       "airlight_method": "dcp_heuristic",
       "models": {
@@ -1328,7 +1328,7 @@
     },
     {
       "name": "light_haze_soft_overcast",
-      "weight": 0.14,
+      "weight": 0.22,
       "model": "heterogeneous_k_ls",
       "airlight_method": "dcp_heuristic",
       "models": {
@@ -1614,7 +1614,7 @@
     },
     {
       "name": "moderate_gloomy_fog_nominal_camera",
-      "weight": 0.18,
+      "weight": 0.22,
       "model": "heterogeneous_k_ls",
       "airlight_method": "dcp_heuristic",
       "models": {
@@ -1900,7 +1900,7 @@
     },
     {
       "name": "underexposed_dense_gloom",
-      "weight": 0.27,
+      "weight": 0.16,
       "model": "heterogeneous_k_ls",
       "airlight_method": "dcp_heuristic",
       "models": {
@@ -2192,7 +2192,7 @@
     },
     {
       "name": "severe_low_contrast_sensor_stress",
-      "weight": 0.22,
+      "weight": 0,
       "model": "heterogeneous_k_ls",
       "airlight_method": "dcp_heuristic",
       "models": {
@@ -2335,7 +2335,7 @@
           },
           "droplets": {
             "enabled": true,
-            "probability": 0.18,
+            "probability": 0,
             "count": {
               "dist": "uniform",
               "min": 2,

@@ -33,7 +33,8 @@ attenuation is scene-consistent rather than a flat overlay.*
 `configs/dense_gloomy_daylight_fog_camera.json`. Each profile samples fog density,
 airlight, exposure, sensor noise and compression together, so weather and camera
 response stay correlated. The last two are deliberately extreme low-light stress
-cases — their auto-exposure targets a mean luminance of ~0.1. The images predate the
+cases — their auto-exposure targets a mean luminance of ~0.1. The last one now has
+weight 0, so it is never sampled. The images predate the
 lifted tone-curve toe and the removal of lens distortion and droplets (see the
 CHANGELOG), so current output is brighter.*
 
@@ -485,6 +486,10 @@ Enable the recommended camera stack with `"capture": {"preset": "camera"}` (or
 > fringing move pixels in the RGB only. Depth, segmentation, sky masks and
 > intrinsics keep the source grid, so they no longer line up with the image.
 > Set these effects to zero when the outputs are used with geometric labels.
+> `configs/dense_gloomy_daylight_fog_camera.json` sets lens distortion and
+> droplets to zero. Its chromatic aberration and depth fringing stay on (at most
+> 0.28 px and 0.55 px). The built-in `optics` stage samples `lens_distortion`
+> in ±0.015 unless the config sets it.
 > See [docs/open-issues.md](docs/open-issues.md).
 
 Four opt-in `sensor` blocks cover most of the realism tuning:
@@ -582,7 +587,8 @@ atmospheric light, camera profile, capture overrides, ISP, and compression toget
 omitted, the stage keeps sampling its own weights locally.
 `configs/dense_gloomy_daylight_fog_camera.json` contains a complete six-profile set
 covering clear weather through severe sensor stress — the profiles shown in the header
-images.
+images. The severe stress profile has weight 0, so it is never sampled. Give it a
+weight to use it. A weight of 0 is valid, and the sampler normalizes the weights.
 
 ### Progressive Mode
 

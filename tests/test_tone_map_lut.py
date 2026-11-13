@@ -16,8 +16,8 @@ try:
 except ImportError:
     torch = None
 
-# A camera-response curve whose toe compresses shadows ~11x, matching the
-# profiles in configs/dense_gloomy_daylight_fog_camera.json.
+# A camera-response curve whose toe compresses shadows ~11x: the original
+# dense_gloomy_daylight_dashcam LUT, kept here as a steep-toe test case.
 TOE_LUT = [
     0.0, 0.006, 0.014, 0.028, 0.052, 0.090, 0.145, 0.220,
     0.320, 0.450, 0.610, 0.780, 0.900, 0.965, 0.995, 1.0,
