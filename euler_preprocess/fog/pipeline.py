@@ -142,6 +142,7 @@ class FogProcessingPipeline:
         depth_m=None,
         k_map=None,
         device=None,
+        capture_parameters: list[dict[str, Any]] | None = None,
     ) -> CaptureContext:
         """Build the complete capture context shared by CPU and Torch routes."""
         return CaptureContext(
@@ -151,6 +152,7 @@ class FogProcessingPipeline:
             intrinsics=intrinsics,
             depth_m=depth_m,
             k_map=k_map,
+            capture_parameters=capture_parameters,
             attributes={
                 "sky_mask": sky_mask,
                 "airlight": airlight,
@@ -175,6 +177,7 @@ class FogProcessingPipeline:
         airlight_method: str | None = None,
         capture_artifacts: CaptureArtifactPipeline | None = None,
         clear_weather: bool = False,
+        capture_parameters: list[dict[str, Any]] | None = None,
     ) -> FogPipelineResult:
         if clear_weather:
             height, width = depth_m.shape
@@ -208,6 +211,7 @@ class FogProcessingPipeline:
                 intrinsics=intrinsics,
                 depth_m=depth_m,
                 k_map=result.k_map,
+                capture_parameters=capture_parameters,
             ),
             capture_artifacts=capture_artifacts,
         )

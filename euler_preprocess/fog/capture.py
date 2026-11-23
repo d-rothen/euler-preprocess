@@ -17,7 +17,7 @@ from euler_preprocess.common.color import (
     srgb_to_linear_torch,
 )
 from euler_preprocess.common.noise import perlin_fbm, perlin_fbm_torch
-from euler_preprocess.common.sampling import deep_merge, sample_value
+from euler_preprocess.common.sampling import deep_merge, freeze_distribution_specs, sample_value
 
 try:
     import torch
@@ -37,6 +37,7 @@ class CaptureContext:
     k_map: Any | None = None
     fog_opacity: Any | None = None
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    capture_parameters: list[dict[str, Any]] | None = None
 
 
 class CaptureArtifactStage:
@@ -85,8 +86,8 @@ class ConfiguredCaptureStage(CaptureArtifactStage):
 
     def apply_np(self, image, context: CaptureContext):
         rng = _rng(context)
-        config = _conditioned_stage_config(self.config, rng)
-        if not self._should_apply(rng, config):
+        config = self._render_config(context, rng)
+        if config is None:
             return image
         return self._apply_np(_as_float_rgb(image), context, rng, config)
 
@@ -94,10 +95,28 @@ class ConfiguredCaptureStage(CaptureArtifactStage):
         if torch is None or not torch.is_tensor(image):
             return self.apply_np(image, context)
         rng = _rng(context)
-        config = _conditioned_stage_config(self.config, rng)
-        if not self._should_apply(rng, config):
+        config = self._render_config(context, rng)
+        if config is None:
             return image
         return self._apply_torch(_as_float_rgb_torch(image), context, rng, config)
+
+    def _render_config(
+        self, context: CaptureContext, rng: np.random.Generator,
+    ) -> Mapping[str, Any] | None:
+        parameters = context.capture_parameters
+        record = {"stage": self.name} if parameters is not None else None
+        config = _conditioned_stage_config(self.config, rng, record)
+        applied = self._should_apply(rng, config, record)
+        if record is not None:
+            record["applied"] = applied
+            if applied:
+                config = {
+                    key: value if key == "sensor_identity" else freeze_distribution_specs(value, rng)
+                    for key, value in config.items() if key != "probability"
+                }
+                record["config"] = config
+            parameters.append(record)
+        return config if applied else None
 
     def _apply_np(
         self,
@@ -123,10 +142,13 @@ class ConfiguredCaptureStage(CaptureArtifactStage):
         self,
         rng: np.random.Generator,
         config: Mapping[str, Any],
+        record: dict[str, Any] | None = None,
     ) -> bool:
         if not _bool_value(config.get("enabled", True)):
             return False
         probability = _sample_float(config, "probability", 1.0, rng)
+        if record is not None:
+            record["probability"] = probability
         if probability <= 0.0:
             return False
         if probability >= 1.0:
@@ -392,6 +414,11 @@ class ExposureStage(ConfiguredCaptureStage):
         jitter = _sample_float(config, "white_balance_jitter", 0.0, rng)
         if jitter > 0.0:
             wb = wb * rng.lognormal(mean=0.0, sigma=jitter, size=3).astype(np.float32)
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"] = {
+                "exposure_gain": gain,
+                "white_balance": wb.tolist(),
+            }
         out = image * gain * wb.reshape(1, 1, 3)
         if _bool_value(config.get("clip", True)):
             out = _clip01(out)
@@ -412,6 +439,11 @@ class ExposureStage(ConfiguredCaptureStage):
         jitter = _sample_float(config, "white_balance_jitter", 0.0, rng)
         if jitter > 0.0:
             wb = wb * rng.lognormal(mean=0.0, sigma=jitter, size=3).astype(np.float32)
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"] = {
+                "exposure_gain": gain,
+                "white_balance": wb.tolist(),
+            }
         wb_t = torch.as_tensor(wb, device=image.device, dtype=image.dtype)
         out = image * float(gain) * wb_t.view(1, 1, 3)
         if _bool_value(config.get("clip", True)):
@@ -597,6 +629,16 @@ class SensorStage(ConfiguredCaptureStage):
             size=3,
         ).astype(np.float32)
         white_levels = np.clip(white_levels, 0.05, 1.0)
+        if context.capture_parameters is not None:
+            effective = {
+                "exposure_gain": exposure,
+                "white_balance": wb.tolist(),
+                "bayer_pattern": pattern,
+                "black_level": black_levels.tolist(),
+                "white_level": white_levels.tolist(),
+            }
+            context.capture_parameters[-1]["effective"] = effective
+
 
         black_map = _mosaic_channel_values(raw_signal.shape, pattern, black_levels)
         white_map = _mosaic_channel_values(raw_signal.shape, pattern, white_levels)
@@ -608,6 +650,8 @@ class SensorStage(ConfiguredCaptureStage):
             pattern,
             config,
             rng,
+            effective=context.capture_parameters[-1]["effective"]
+            if context.capture_parameters is not None else None,
         )
         noisy_signal = raw_signal
         if np.any(electron_capacity > 0.0):
@@ -714,6 +758,8 @@ class SensorStage(ConfiguredCaptureStage):
             else "adc_bit_depth"
         )
         adc_bit_depth = int(round(_sample_float(config, bit_depth_key, 12.0, rng)))
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"]["adc_bit_depth"] = adc_bit_depth
         if adc_bit_depth > 0:
             raw = _quantize_np(raw, adc_bit_depth)
 
@@ -820,6 +866,16 @@ class SensorStage(ConfiguredCaptureStage):
             size=3,
         ).astype(np.float32)
         white_levels = np.clip(white_levels, 0.05, 1.0)
+        if context.capture_parameters is not None:
+            effective = {
+                "exposure_gain": exposure,
+                "white_balance": wb.tolist(),
+                "bayer_pattern": pattern,
+                "black_level": black_levels.tolist(),
+                "white_level": white_levels.tolist(),
+            }
+            context.capture_parameters[-1]["effective"] = effective
+
 
         black_map = _mosaic_channel_values_torch(
             tuple(raw_signal.shape),
@@ -845,6 +901,8 @@ class SensorStage(ConfiguredCaptureStage):
             rng,
             raw_signal.device,
             raw_signal.dtype,
+            effective=context.capture_parameters[-1]["effective"]
+            if context.capture_parameters is not None else None,
         )
         noisy_signal = raw_signal
         if bool(torch.any(electron_capacity > 0.0).detach().cpu()):
@@ -959,6 +1017,8 @@ class SensorStage(ConfiguredCaptureStage):
             else "adc_bit_depth"
         )
         adc_bit_depth = int(round(_sample_float(config, bit_depth_key, 12.0, rng)))
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"]["adc_bit_depth"] = adc_bit_depth
         if adc_bit_depth > 0:
             raw = _quantize_torch(raw, adc_bit_depth)
 
@@ -1196,6 +1256,10 @@ class TransportStage(ConfiguredCaptureStage):
             img = _resize_np(img, target_size, str(config.get("resample", "bilinear")))
 
         bit_depth = int(round(_sample_float(config, "bit_depth", 8.0, rng)))
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"] = {
+                "bit_depth": bit_depth, "output_size": [int(img.shape[0]), int(img.shape[1])],
+            }
         if bit_depth > 0:
             img = _quantize_np(img, bit_depth)
 
@@ -1209,6 +1273,10 @@ class TransportStage(ConfiguredCaptureStage):
             quality = int(round(_sample_float(jpeg_cfg, "quality", 90.0, rng)))
             quality = int(np.clip(quality, 1, 100))
             subsampling = int(round(_sample_float(jpeg_cfg, "subsampling", 2.0, rng)))
+            if context.capture_parameters is not None:
+                context.capture_parameters[-1]["effective"]["jpeg"] = {
+                    "quality": quality, "subsampling": subsampling,
+                }
             img = _jpeg_roundtrip_np(img, quality=quality, subsampling=subsampling)
 
         return _clip01(img)
@@ -1235,6 +1303,10 @@ class TransportStage(ConfiguredCaptureStage):
             )
 
         bit_depth = int(round(_sample_float(config, "bit_depth", 8.0, rng)))
+        if context.capture_parameters is not None:
+            context.capture_parameters[-1]["effective"] = {
+                "bit_depth": bit_depth, "output_size": [int(img.shape[0]), int(img.shape[1])],
+            }
         if bit_depth > 0:
             img = _quantize_torch(img, bit_depth)
 
@@ -1248,6 +1320,10 @@ class TransportStage(ConfiguredCaptureStage):
             quality = int(round(_sample_float(jpeg_cfg, "quality", 90.0, rng)))
             quality = int(np.clip(quality, 1, 100))
             subsampling = int(round(_sample_float(jpeg_cfg, "subsampling", 2.0, rng)))
+            if context.capture_parameters is not None:
+                context.capture_parameters[-1]["effective"]["jpeg"] = {
+                    "quality": quality, "subsampling": subsampling,
+                }
             img_np = _jpeg_roundtrip_np(
                 _torch_to_numpy_image(img),
                 quality=quality,
@@ -1631,6 +1707,7 @@ _CONDITION_PROFILE_METADATA = {
 def _conditioned_stage_config(
     config: Mapping[str, Any],
     rng: np.random.Generator,
+    record: dict[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     profile_key = next(
         (key for key in _CONDITION_PROFILE_KEYS if config.get(key) is not None),
@@ -1682,6 +1759,8 @@ def _conditioned_stage_config(
     if selector is not None:
         for name, profile in zip(names, choices):
             if name == selector:
+                if record is not None:
+                    record["condition_profile"] = name
                 return deep_merge(base, profile)
         available = ", ".join(name for name in names if name is not None)
         raise ValueError(
@@ -1694,8 +1773,10 @@ def _conditioned_stage_config(
     if not np.isfinite(total) or total <= 0.0:
         raise ValueError(f"{profile_key} must contain at least one positive weight")
 
-    selected = choices[int(rng.choice(len(choices), p=weights_arr / total))]
-    return deep_merge(base, selected)
+    selected = int(rng.choice(len(choices), p=weights_arr / total))
+    if record is not None:
+        record["condition_profile"] = names[selected] or selected
+    return deep_merge(base, choices[selected])
 
 
 def _condition_profile_selector(config: Mapping[str, Any]) -> str | None:
@@ -2710,10 +2791,14 @@ def _resolve_electron_capacity(
     pattern: str,
     config: Mapping[str, Any],
     rng: np.random.Generator,
+    *,
+    effective: dict[str, Any] | None = None,
 ) -> np.ndarray:
     legacy = config.get("shot_noise_electrons")
     if legacy is not None:
         electrons = float(sample_value(legacy, rng))
+        if effective is not None:
+            effective["shot_noise_electrons"] = electrons
         if electrons <= 0.0:
             return np.zeros(shape, dtype=np.float32)
         return np.full(shape, electrons, dtype=np.float32)
@@ -2725,6 +2810,8 @@ def _resolve_electron_capacity(
         config.get("full_well_electrons", [12000.0, 12000.0, 12000.0]),
         rng,
     )
+    if effective is not None:
+        effective.update(iso=iso, base_iso=base_iso, full_well_electrons=full_well.tolist())
     full_well_map = _mosaic_channel_values(shape, pattern, full_well)
     capacity = full_well_map / iso_gain
     return np.where(capacity > 0.0, np.maximum(capacity, 1.0), 0.0).astype(
@@ -2740,10 +2827,14 @@ def _resolve_electron_capacity_torch(
     rng: np.random.Generator,
     device,
     dtype,
+    *,
+    effective: dict[str, Any] | None = None,
 ):
     legacy = config.get("shot_noise_electrons")
     if legacy is not None:
         electrons = float(sample_value(legacy, rng))
+        if effective is not None:
+            effective["shot_noise_electrons"] = electrons
         if electrons <= 0.0:
             return torch.zeros(shape, device=device, dtype=dtype)
         return torch.full(shape, electrons, device=device, dtype=dtype)
@@ -2755,6 +2846,8 @@ def _resolve_electron_capacity_torch(
         config.get("full_well_electrons", [12000.0, 12000.0, 12000.0]),
         rng,
     )
+    if effective is not None:
+        effective.update(iso=iso, base_iso=base_iso, full_well_electrons=full_well.tolist())
     full_well_map = _mosaic_channel_values_torch(
         shape,
         pattern,

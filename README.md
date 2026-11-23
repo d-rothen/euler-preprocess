@@ -94,7 +94,8 @@ loader.
 | `output_path` | Output root used when no pipeline target overrides it. Optional if `pipeline.output_root` or `pipeline.output_targets[].path` supplies the destination. |
 | `output_slot` | Optional slot selector when `pipeline.output_targets` has several entries. Defaults to `rgb` for `fog` and `depth` for `sky-depth` / `radial`. |
 | `sample` | Optional 0-based dataset index. Only `dataset[sample]` is transformed — useful for small benchmark slices of large datasets. |
-| `samples` | Optional multi-sample selector: a list of indices (`[0, 10, 20]`) or a slice object (`{"start": 0, "stop": 1000, "step": 2, "count": 100}`). `stop` is exclusive, `count` caps the result. Mutually exclusive with `sample`. |
+| `samples` | Optional multi-sample selector: a list of indices (`[0, 10, 20]`) or a slice object (`{"start": 0, "stop": 1000, "step": 2, "count": 100}`). `stop` is exclusive, `count` caps the result. With fog `file_ids`, this is a positive integer giving the number of renders per variant. Mutually exclusive with `sample`. |
+| `file_ids` | Fog only. List of file IDs in the joined dataset. Use qualified IDs such as `/scene/camera/frame` where short IDs are ambiguous. See [Repeated Renders for Selected Files](#repeated-renders-for-selected-files). |
 | `modalities` | All input modalities. Each value is a path string or an object with `path` and optional `split`. Whether a modality is per-sample or hierarchical is inferred (see below). |
 | `hierarchical_modalities` | Legacy, optional. Same format; entries are pooled with `modalities` and resolved the same way. |
 | `pipeline` | Optional runtime routing block compatible with `euler-inference`. |
@@ -653,6 +654,37 @@ Each output receives per-file ds-crawler attributes under `fog_augmentation` —
 augmentation id, source id and full id, model, actual scattering coefficient, actual
 atmospheric light, and configured MOR/beta descriptors. euler-loading exposes these as
 `sample["attributes"]["rgb"]["fog_augmentation"]`.
+
+### Repeated Renders for Selected Files
+
+Add `"file_ids": ["file_123"]` and `"samples": 5` to the **dataset config** and
+run `euler-preprocess fog -c dataset-config.json`. If `samples` is omitted, it
+defaults to one. File IDs are resolved after joining the configured modalities
+and applying their split filters. The command rejects missing, ambiguous, and
+duplicate IDs.
+
+- Sample mode renders each positive-weight scenario five times. A config without
+  scenario profiles renders the base config five times. Stepped augmentations
+  render the requested count for each configured variant within each eligible
+  scenario.
+- Progressive mode renders five times at every configured step, including step
+  zero. For example, `"steps": 4` produces 25 images per file per scenario. Each
+  repeat uses the same sampled endpoints across its ladder.
+
+The source hierarchy and file ID group the outputs. Variants have names like
+`scenario_001_dense__step_002__sample_005.png`, and any auxiliary maps use the
+same variant ID. Scenario and repeat numbers in filenames start at one, and
+progressive steps start at zero. Running the same selection against the same
+output root reuses those names.
+
+`fog_manifest.json` in the RGB output directory maps each rendered image path
+to its source and output IDs, scenario, repeat, progressive step and weight
+where applicable, resolved fog and camera settings, and any auxiliary paths.
+Camera records include the stages applied and effective values such as exposure
+gain, white balance, and ISO when used. ZIP outputs write the manifest beside
+the archive as `<archive>.fog_manifest.json`, with image paths in the form
+`<archive>::<member>`. A configured `seed` keeps the draws reproducible when
+file selection order changes on the same backend.
 
 ### Output
 

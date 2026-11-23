@@ -152,7 +152,39 @@ def _select_configured_samples(config: dict, dataset, logger):
     return _SelectedSamples(dataset, indices)
 
 
-def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
+def _select_fog_file_ids(file_ids: Any, dataset, logger) -> _SelectedSamples:
+    if not isinstance(file_ids, list) or not file_ids or any(
+        not isinstance(file_id, str) or not file_id.strip() for file_id in file_ids
+    ):
+        raise ValueError("file_ids must be a non-empty list of file ID strings")
+    normalized = [
+        "/" + file_id.lstrip("/") if "/" in file_id else file_id
+        for file_id in file_ids
+    ]
+    matches: dict[str, list[int]] = {file_id: [] for file_id in normalized}
+    for index in range(len(dataset)):
+        full_id = dataset.sample_full_id(index, "rgb")
+        for key in (full_id, full_id.rsplit("/", 1)[-1]):
+            if key in matches:
+                matches[key].append(index)
+
+    indices: list[int] = []
+    for file_id, key in zip(file_ids, normalized):
+        candidates = matches[key]
+        if not candidates:
+            raise ValueError(f"File ID {file_id!r} is absent from the joined dataset")
+        if len(candidates) > 1:
+            raise ValueError(f"File ID {file_id!r} is ambiguous; use its qualified ID")
+        indices.append(candidates[0])
+    if len(set(indices)) != len(indices):
+        raise ValueError("file_ids contains duplicate source files")
+    logger.info("File ID selection: using %d/%d samples", len(indices), len(dataset))
+    return _SelectedSamples(dataset, indices)
+
+
+def _run_transform(
+    args: argparse.Namespace, transform_class: type, *, allow_file_ids: bool = False,
+) -> int:
     """Shared logic for all subcommands."""
     logger = get_logger()
 
@@ -188,9 +220,16 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         transform_class.MODALITY_FUNCTIONS,
         optional_modalities=getattr(transform_class, "OPTIONAL_MODALITIES", None),
     )
+    repeats = None
+    if allow_file_ids and "file_ids" in config:
+        if "sample" in config:
+            raise ValueError("Use either file_ids or sample, not both")
+        repeats = _positive_int(config.get("samples", 1), key="samples")
+        samples = _select_fog_file_ids(config["file_ids"], dataset, logger)
+    else:
+        samples = _select_configured_samples(config, dataset, logger)
     output_backends = prepare_output_backends(config, dataset, transform_class)
     primary_backend = next(iter(output_backends.values()))
-    samples = _select_configured_samples(config, dataset, logger)
     dataset_name = config.get("dataset", "dataset")
 
     raw_modalities = {
@@ -211,6 +250,8 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
         "config_path": str(transform_config_path),
         "out_path": str(primary_backend.root),
     }
+    if repeats is not None:
+        transform_kwargs["samples_per_variant"] = repeats
     init_params = inspect.signature(transform_class.__init__).parameters
     if "output_backends" in init_params:
         transform_kwargs["output_backends"] = output_backends
@@ -248,7 +289,7 @@ def _run_transform(args: argparse.Namespace, transform_class: type) -> int:
 
 def _cmd_fog(args: argparse.Namespace) -> int:
     from euler_preprocess.fog.transform import FogTransform
-    return _run_transform(args, FogTransform)
+    return _run_transform(args, FogTransform, allow_file_ids=True)
 
 
 def _cmd_sky_depth(args: argparse.Namespace) -> int:

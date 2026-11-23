@@ -53,6 +53,17 @@ def deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def freeze_distribution_specs(value, rng: np.random.Generator):
+    """Resolve distribution specs while preserving ordinary config structure."""
+    if isinstance(value, dict):
+        if "dist" in value:
+            return sample_value(value, rng)
+        return {key: freeze_distribution_specs(child, rng) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(freeze_distribution_specs(child, rng) for child in value)
+    return value
+
+
 def format_value(value: float) -> str:
     text = f"{value:.4f}".rstrip("0").rstrip(".")
     return text or "0"

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import pytest
@@ -24,6 +26,7 @@ from euler_loading.loaders.cpu.generic import (
     map_3d as load_map_3d,
 )
 
+from euler_preprocess.cli import _cmd_fog
 from euler_preprocess.common.output import prepare_output_backends
 import euler_preprocess.fog.capture as capture_module
 from euler_preprocess.fog.capture import CaptureArtifactPipeline, CaptureContext
@@ -36,7 +39,7 @@ from euler_preprocess.fog.transform import (
 )
 
 
-def _write_rgb_dataset(root: Path) -> None:
+def _write_rgb_dataset(root: Path, shape=(4, 6)) -> None:
     writer = DatasetWriter(
         root,
         name="synthetic_rgb",
@@ -48,9 +51,9 @@ def _write_rgb_dataset(root: Path) -> None:
     )
     rgb = np.dstack(
         [
-            np.full((4, 6), 32, dtype=np.uint8),
-            np.full((4, 6), 96, dtype=np.uint8),
-            np.full((4, 6), 160, dtype=np.uint8),
+            np.full(shape, 32, dtype=np.uint8),
+            np.full(shape, 96, dtype=np.uint8),
+            np.full(shape, 160, dtype=np.uint8),
         ]
     )
     path = writer.get_path("Scene01/Camera_0/00001", "00001.png")
@@ -58,7 +61,7 @@ def _write_rgb_dataset(root: Path) -> None:
     writer.save_index()
 
 
-def _write_depth_dataset(root: Path) -> None:
+def _write_depth_dataset(root: Path, shape=(4, 6)) -> None:
     writer = DatasetWriter(
         root,
         name="synthetic_depth",
@@ -72,13 +75,13 @@ def _write_depth_dataset(root: Path) -> None:
         },
         euler_loading={"loader": "generic_dense_depth", "function": "depth"},
     )
-    depth = np.full((4, 6), 25.0, dtype=np.float32)
+    depth = np.full(shape, 25.0, dtype=np.float32)
     path = writer.get_path("Scene01/Camera_0/00001", "00001.npy")
     write_depth(str(path), depth)
     writer.save_index()
 
 
-def _write_sky_mask_dataset(root: Path) -> None:
+def _write_sky_mask_dataset(root: Path, shape=(4, 6)) -> None:
     writer = DatasetWriter(
         root,
         name="synthetic_sky_mask",
@@ -88,21 +91,21 @@ def _write_sky_mask_dataset(root: Path) -> None:
         meta={"sky_mask": [255, 255, 255]},
         euler_loading={"loader": "generic_dense_depth", "function": "sky_mask"},
     )
-    mask = np.zeros((4, 6), dtype=bool)
+    mask = np.zeros(shape, dtype=bool)
     mask[0, :] = True
     path = writer.get_path("Scene01/Camera_0/00001", "00001.png")
     write_sky_mask(str(path), mask, {"sky_mask": [255, 255, 255]})
     writer.save_index()
 
 
-def _make_dataset(tmp_path: Path) -> MultiModalDataset:
+def _make_dataset(tmp_path: Path, shape=(4, 6)) -> MultiModalDataset:
     rgb_root = tmp_path / "rgb"
     depth_root = tmp_path / "depth"
     sky_root = tmp_path / "sky_mask"
 
-    _write_rgb_dataset(rgb_root)
-    _write_depth_dataset(depth_root)
-    _write_sky_mask_dataset(sky_root)
+    _write_rgb_dataset(rgb_root, shape)
+    _write_depth_dataset(depth_root, shape)
+    _write_sky_mask_dataset(sky_root, shape)
 
     return MultiModalDataset(
         modalities={
@@ -454,6 +457,101 @@ def test_progressive_scenario_profiles_write_steps_and_attributes(
         "name": "fog_progression",
         "location": "file_id",
     }
+
+
+@pytest.mark.parametrize("torch_path", [False, True], ids=["numpy", "torch"])
+def test_fog_file_ids_repeat_each_progressive_step_with_a_manifest(
+    tmp_path: Path, monkeypatch, torch_path: bool,
+) -> None:
+    if torch_path:
+        torch = pytest.importorskip("torch")
+
+        def configure_torch_on_cpu(transform):
+            transform.torch_device = torch.device("cpu")
+            transform.use_gpu = True
+
+        monkeypatch.setattr(FogTransform, "_configure_device", configure_torch_on_cpu)
+
+    _make_dataset(tmp_path, shape=(8, 10))
+    fog_path = _write_progressive_scenario_fog_config(tmp_path / "fog.json")
+    fog = json.loads(fog_path.read_text())
+    profile = fog["scenario_profiles"][0]
+    profile["models"]["uniform"]["visibility_m"] = {
+        "dist": "uniform", "min": 12, "max": 30,
+    }
+    fog["capture"] = {"stages": [{"type": "exposure", "gain": 1.0}]}
+    fog["planar_depth_as_distance"] = True
+    profile["capture_overrides"] = {
+        "exposure": {"gain": {"dist": "uniform", "min": 1.2, "max": 1.8}},
+    }
+    fog_path.write_text(json.dumps(fog))
+    output = tmp_path / "output"
+    dataset_config = _build_pipeline_config(
+        output, output / "pipeline_outputs.json", include_scattering=True, include_airlight=True,
+    )
+    dataset_config.update(
+        transform_config_path=str(fog_path),
+        modalities={
+            "rgb": str(tmp_path / "rgb"), "depth": str(tmp_path / "depth"),
+            "semantic_segmentation": str(tmp_path / "sky_mask"),
+        },
+        file_ids=["/Scene01/Camera_0/00001"], samples=2,
+    )
+    config_path = tmp_path / "dataset.json"
+    config_path.write_text(json.dumps(dataset_config))
+
+    assert _cmd_fog(Namespace(config=str(config_path))) == 0
+
+    directory = output / "foggy_rgb" / "Scene01" / "Camera_0" / "00001"
+    manifest = json.loads((output / "foggy_rgb" / "fog_manifest.json").read_text())
+    assert set(manifest["outputs"]) == {str(path) for path in directory.glob("*.png")}
+    assert len(manifest["outputs"]) == 6
+    endpoints = []
+    for repeat in (1, 2):
+        ladder = []
+        for step in (0, 1, 2):
+            name = f"scenario_001_dense__step_{step:03d}__sample_{repeat:03d}"
+            entry = manifest["outputs"][str(directory / f"{name}.png")]
+            assert entry["source_full_id"] == "/Scene01/Camera_0/00001"
+            assert entry["output_full_id"].endswith(f"/file_id:00001/{name}")
+            assert (entry["step"], entry["sample"], entry["weight"]) == (step, repeat, step / 2)
+            scattering_path = Path(entry["auxiliary_outputs"][SCATTERING_COEFFICIENT_SLOT])
+            assert scattering_path.stem == name
+            np.testing.assert_allclose(np.load(scattering_path), entry["scattering_coefficient"])
+            camera = entry["camera"][0]
+            assert camera["stage"] == "exposure"
+            assert camera["effective"]["exposure_gain"] == camera["config"]["gain"]
+            ladder.append((entry["scattering_coefficient"], camera["effective"]["exposure_gain"]))
+        np.testing.assert_allclose(ladder[1], (np.array(ladder[0]) + ladder[2]) / 2)
+        endpoints.append(ladder[-1])
+    assert endpoints[0] != endpoints[1]
+
+
+def test_repeated_scenario_names_are_unique_in_zip_and_skip_zero_weight(tmp_path: Path) -> None:
+    dataset = _make_dataset(tmp_path)
+    archive = tmp_path / "fog.zip"
+    config_path = _write_fog_config(tmp_path / "fog.json")
+    fog = json.loads(config_path.read_text())
+    fog["scenario_profiles"] = [
+        {"name": "dense fog"}, {"name": "dense_fog"}, {"name": "disabled", "weight": 0},
+    ]
+    config_path.write_text(json.dumps(fog))
+    backends = prepare_output_backends({"output_path": str(archive)}, dataset, FogTransform)
+    transform = FogTransform(
+        config_path=str(config_path), out_path=str(archive), output_backends=backends,
+        samples_per_variant=2,
+    )
+
+    saved = transform.run(dataset)
+
+    manifest = json.loads((tmp_path / "fog.zip.fog_manifest.json").read_text())
+    assert set(manifest["outputs"]) == {str(path) for path in saved}
+    with ZipFile(archive) as zipped:
+        names = [Path(name).stem for name in zipped.namelist() if name.endswith(".png")]
+    assert sorted(names) == [
+        f"scenario_{scenario:03d}_dense_fog__sample_{repeat:03d}"
+        for scenario in (1, 2) for repeat in (1, 2)
+    ]
 
 
 def test_progressive_scenario_profiles_accept_extrapolated_airlight_dampening(
