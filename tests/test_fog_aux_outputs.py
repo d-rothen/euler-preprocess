@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from argparse import Namespace
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -26,7 +25,7 @@ from euler_loading.loaders.cpu.generic import (
     map_3d as load_map_3d,
 )
 
-from euler_preprocess.cli import _cmd_fog
+from euler_preprocess.cli import run_transform
 from euler_preprocess.common.output import prepare_output_backends
 import euler_preprocess.fog.capture as capture_module
 from euler_preprocess.fog.capture import CaptureArtifactPipeline, CaptureContext
@@ -500,7 +499,7 @@ def test_fog_file_ids_repeat_each_progressive_step_with_a_manifest(
     config_path = tmp_path / "dataset.json"
     config_path.write_text(json.dumps(dataset_config))
 
-    assert _cmd_fog(Namespace(config=str(config_path))) == 0
+    assert run_transform("fog", config_path)
 
     directory = output / "foggy_rgb" / "Scene01" / "Camera_0" / "00001"
     manifest = json.loads((output / "foggy_rgb" / "fog_manifest.json").read_text())

@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 3.25.0
+
+- **Your own transforms, without a pull request.** A `Transform` subclass in
+  any installed package, declared in the suite's `euler.transforms`
+  entry-point group, runs with `euler-preprocess run <name> -c
+  <dataset-config>` (requires euler-dataset-contract 0.23.0 for the shared
+  extension protocol). The built-in transforms are listed in
+  `euler_preprocess.registry.BUILTIN_TRANSFORMS` and loaded through the same
+  path; `fog`, `sky-depth`, `radial` and `lidar-motion` keep their own
+  subcommands, which are the same as `run <name>`.
+- Every transform is checked when it is loaded
+  (`registry.validate_transform`): `SOURCE_MODALITY` is a required modality,
+  `MODALITY_FUNCTIONS` names only modalities the transform takes, auxiliary
+  `OUTPUT_SLOT_SPECS` are in `OUTPUT_SLOTS` and need a constructor that
+  accepts `output_backends`.
+- An installed transform that takes a built-in transform's or command's name
+  (`shadows_builtin`; the built-in is used), is offered by two packages
+  (`conflict`), fails to import or breaks a rule is not loaded and is
+  reported: `euler-preprocess transforms` lists the problems, they are logged,
+  and `EULER_EXTENSIONS_STRICT=1` raises.
+- `euler-preprocess transforms [--json]` and `transform_capability_report()`:
+  the versioned `transform_capability_report` 1.0 with every transform
+  (provider, required/optional/hierarchical modalities, loader functions,
+  output slots, config hints, run options), the other commands and the
+  problems. Registered as `euler-preprocess` in `euler.capabilities` for
+  `euler-suite report` and euler-view.
+- `Transform.CONFIG_HINTS` documents a transform's config keys; the built-in
+  transforms declare theirs.
+- `run_transform(name, config, transform_config=None, strict=False)` runs a
+  transform from Python and returns the written paths; `-t/--transform-config`
+  replaces the dataset config's `transform_config_path`.
+- Options a transform does not support are errors instead of warnings:
+  `--strict` for a transform without a strict mode, and `file_ids` for one
+  without `samples_per_variant` (it used to be ignored). `file_ids` are
+  matched in the transform's `SOURCE_MODALITY` instead of always `rgb`.
+- The release workflow runs the test suite before building.
+- **Removed:** the `fog_config_path` dataset-config key (use
+  `transform_config_path`), the fallback re-implementation of
+  `build_layout_addon` for ds-crawler releases without it, and the internal
+  `_run_transform(args, cls)` / `_cmd_fog` helpers (use `run_transform`).
+
+## Earlier, unreleased notes
 
 - `configs/dense_gloomy_daylight_fog_camera.json` (`dense_gloomy_daylight_dashcam`):
   - Lens distortion is off: `lens_distortion` is uniform 0..0 (was −0.012…0.006).

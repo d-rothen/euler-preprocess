@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from ds_crawler import DatasetWriter
 from euler_loading import Modality, MultiModalDataset
 from euler_loading.loaders.cpu import muses
 
-from euler_preprocess.cli import _run_transform
+from euler_preprocess.cli import run_transform
 from euler_preprocess.lidar_motion.compensation import compensate_ego_motion
 from euler_preprocess.lidar_motion.transform import LidarMotionTransform
 
@@ -180,7 +179,7 @@ def muses_dataset(tmp_path):
 @needs_muses_motion_inputs
 def test_cli_writes_compensated_lidar(muses_dataset):
     dataset_config, out_root, clouds, meta = muses_dataset
-    assert _run_transform(argparse.Namespace(config=str(dataset_config), strict=False), LidarMotionTransform) == 0
+    assert run_transform("lidar-motion", dataset_config)
 
     out = MultiModalDataset(modalities={"sparse_depth": Modality(str(out_root))})
     assert len(out) == len(FRAMES)

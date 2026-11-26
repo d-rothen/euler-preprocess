@@ -36,6 +36,19 @@ class Transform(ABC):
         together with per-slot specs in :attr:`OUTPUT_SLOT_SPECS`.  Auxiliary
         slots are opt-in: they are only written when the dataset config's
         ``pipeline.output_targets`` includes a matching entry.
+
+    Transform config:
+        :attr:`CONFIG_HINTS` documents the keys of the transform config
+        (``transform_config_path``) for the capability report and euler-view:
+        ``{key: {"type": ..., "default": ..., "description": ...}}``.
+
+    Running it:
+        ``euler-preprocess run <name> -c <dataset-config>`` runs any
+        registered transform (see :mod:`euler_preprocess.registry`); a
+        package registers its own in the ``euler.transforms`` entry-point
+        group. The CLI calls ``__init__(config_path=..., out_path=...)`` plus
+        the optional keywords the constructor accepts
+        (:data:`~euler_preprocess.registry.RUN_OPTIONS`), then :meth:`run`.
     """
 
     REQUIRED_MODALITIES: ClassVar[set[str]] = set()
@@ -47,6 +60,7 @@ class Transform(ABC):
     OUTPUT_SLOTS: ClassVar[tuple[str, ...]] = ()
     OUTPUT_SLOT_SPECS: ClassVar[dict[str, Any]] = {}
     OUTPUT_INDEX_META_OVERRIDES: ClassVar[dict[str, object]] = {}
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {}
 
     @abstractmethod
     def __init__(self, config_path: str, out_path: str) -> None: ...

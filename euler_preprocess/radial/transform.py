@@ -29,6 +29,13 @@ class RadialTransform(Transform):
     SOURCE_MODALITY: ClassVar[str] = "depth"
     OUTPUT_SLOT: ClassVar[str] = "depth"
     OUTPUT_INDEX_META_OVERRIDES: ClassVar[dict[str, object]] = {"radial_depth": True}
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "device": {
+            "type": "string",
+            "default": "cpu",
+            "description": "Only \"cpu\" is implemented; the config may be {}.",
+        },
+    }
 
     def __init__(
         self,

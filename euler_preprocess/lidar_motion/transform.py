@@ -82,6 +82,14 @@ class LidarMotionTransform(Transform):
             "reference": "MUSES SDK processing/utils.py motion_compensate_pcd",
         }
     }
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "timestamp_column": {
+            "type": "integer",
+            "default": 5,
+            "description": "Column of each point's measurement time in seconds "
+            "(MUSES: x, y, z, intensity, ring, timestamp).",
+        },
+    }
 
     def __init__(
         self,

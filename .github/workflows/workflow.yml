@@ -22,6 +22,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5 # The official Astral action
 
+      # A release is only built when the test suite passes (CPU torch).
+      - name: Run tests
+        run: |
+          uv venv --python 3.11
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+          uv pip install -e ".[progress]" pytest
+          .venv/bin/python -m pytest -q
+
       - name: Build package
         run: uv build
 

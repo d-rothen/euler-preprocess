@@ -36,6 +36,19 @@ class SkyDepthTransform(Transform):
     OUTPUT_SLOT: ClassVar[str] = "depth"
 
     DEFAULT_SANITY_CHECK_SAMPLES: ClassVar[int] = 3
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "sky_depth_value": {
+            "type": "number",
+            "default": 1000.0,
+            "description": "Depth assigned to sky pixels.",
+        },
+        "sanity_check_samples": {
+            "type": "integer",
+            "default": DEFAULT_SANITY_CHECK_SAMPLES,
+            "description": "Leading samples with a logged depth/sky-mask breakdown; "
+            "0 disables. With --strict, suspicious ones abort the run.",
+        },
+    }
 
     def __init__(
         self,

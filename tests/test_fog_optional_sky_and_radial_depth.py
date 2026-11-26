@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 from pathlib import Path
@@ -20,7 +19,7 @@ from euler_loading.loaders.cpu.generic_dense_depth import (
 )
 from euler_loading.loaders.cpu.vkitti2 import write_intrinsics
 
-from euler_preprocess.cli import _run_transform
+from euler_preprocess.cli import run_transform
 from euler_preprocess.common.dataset import build_dataset, declared_radial_depth
 from euler_preprocess.common.intrinsics import planar_to_radial_depth
 from euler_preprocess.fog.airlight_from_sky import AirlightFromSky, NoSkyWarning
@@ -156,8 +155,7 @@ def _run_fog_cli(
         ),
         encoding="utf-8",
     )
-    args = argparse.Namespace(config=str(config_path), strict=False)
-    assert _run_transform(args, FogTransform) == 0
+    assert run_transform("fog", config_path)
     output = MultiModalDataset({"rgb": Modality(str(work / "out"))})
     by_id = {output[i]["full_id"]: np.asarray(output[i]["rgb"]) for i in range(len(output))}
     return [by_id["/" + full_id] for full_id in FRAMES]

@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from euler_preprocess.cli import _select_configured_samples, _select_fog_file_ids
+from euler_preprocess.cli import _select_configured_samples, _select_file_ids
 
 
 class _Dataset:
@@ -27,7 +27,7 @@ class _Dataset:
 
 def test_file_id_selection_accepts_short_and_qualified_ids_in_requested_order() -> None:
     dataset = _Dataset()
-    selected = _select_fog_file_ids(
+    selected = _select_file_ids(
         ["frame_002", "/Scene/Camera/frame_000"], dataset, logging.getLogger("test"),
     )
     assert list(selected) == [dataset[2], dataset[0]]
@@ -45,7 +45,7 @@ def test_file_id_selection_validates_joined_ids(file_ids, error) -> None:
     dataset = _Dataset()
     dataset.items[-1]["full_id"] = "/Scene/OtherCamera/frame_000"
     with pytest.raises(ValueError, match=error):
-        _select_fog_file_ids(file_ids, dataset, logging.getLogger("test"))
+        _select_file_ids(file_ids, dataset, logging.getLogger("test"))
 
 
 def test_sample_selection_returns_only_configured_index() -> None:

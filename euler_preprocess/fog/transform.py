@@ -12,7 +12,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, ClassVar
 
 import numpy as np
-from ds_crawler import ZipDatasetWriter
+from ds_crawler import EULER_LAYOUT_ADDON, ZipDatasetWriter, build_layout_addon
 
 from euler_preprocess.common.device import (
     configure_device,
@@ -73,34 +73,6 @@ from euler_loading.loaders.cpu.generic import (
     write_map_2d as _write_map_2d,
     write_map_3d as _write_map_3d,
 )
-
-try:
-    from ds_crawler import EULER_LAYOUT_ADDON, build_layout_addon
-except ImportError:  # pragma: no cover - compatibility with older ds-crawler
-    EULER_LAYOUT_ADDON = "euler_layout"
-
-    def build_layout_addon(**kwargs):
-        payload: dict[str, Any] = {
-            "version": kwargs.get("version", "1.0"),
-            "sample_axis": {
-                "name": kwargs["sample_axis_name"],
-                "location": kwargs["sample_axis_location"],
-            },
-        }
-        family = kwargs.get("family")
-        if family is not None:
-            payload["family"] = family
-        variant_axis_name = kwargs.get("variant_axis_name")
-        if variant_axis_name is not None:
-            payload["variant_axis"] = {
-                "name": variant_axis_name,
-                "location": kwargs.get("variant_axis_location", "file_id"),
-            }
-        derived_from = kwargs.get("derived_from")
-        if derived_from is not None:
-            payload["derived_from"] = dict(derived_from)
-        return payload
-
 
 SCATTERING_COEFFICIENT_SLOT = "scattering_coefficient"
 ATMOSPHERIC_LIGHT_SLOT = "atmospheric_light"
@@ -342,6 +314,52 @@ class FogTransform(Transform):
             index_overlay=_ATMOSPHERIC_LIGHT_INDEX_OVERLAY,
             output_extension=".npy",
         ),
+    }
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "airlight": {
+            "type": "string",
+            "required": True,
+            "choices": ["from_sky", "dcp", "dcp_heuristic"],
+            "description": "How the atmospheric light is estimated.",
+        },
+        "seed": {"type": "integer", "default": None, "description": "Random seed; null for non-deterministic."},
+        "depth_scale": {"type": "number", "default": 1.0, "description": "Multiplier applied to depth after loading."},
+        "resize_depth": {"type": "boolean", "default": True, "description": "Resize depth to the RGB resolution."},
+        "planar_depth_as_distance": {
+            "type": "boolean",
+            "default": False,
+            "description": "Accept planar depth without intrinsics as the distance along the ray.",
+        },
+        "contrast_threshold": {
+            "type": "number",
+            "default": DEFAULT_CONTRAST_THRESHOLD,
+            "description": "Contrast threshold in the visibility-to-attenuation conversion.",
+        },
+        "render_input_space": {
+            "type": "string",
+            "choices": ["srgb", "linear"],
+            "description": "Colour space of the input RGB.",
+        },
+        "mode": {
+            "type": "string",
+            "default": "sample",
+            "choices": ["sample", "progressive"],
+            "description": "One sampled scenario per image, or every scenario step.",
+        },
+        "device": {
+            "type": "string",
+            "default": "cpu",
+            "choices": ["cpu", "cuda", "mps", "gpu"],
+            "description": "Where fog is rendered.",
+        },
+        "gpu_batch_size": {"type": "integer", "default": 4, "description": "Batch size on GPU."},
+        "capture": {"type": "object", "description": "Post-fog camera artifact pipeline."},
+        "camera_profile": {"type": "string|object", "description": "Named or inline camera profile."},
+        "camera_profiles": {"type": "object", "description": "Project-specific named camera profiles."},
+        "scenario_profiles": {"type": "array", "description": "Correlated scene/camera condition sampler."},
+        "selection": {"type": "object", "description": "Per-image fog model selection."},
+        "models": {"type": "object", "description": "Fog models selection chooses from."},
+        "augmentations": {"type": "object", "description": "Stepped augmentation set; every input produces every variant."},
     }
 
     def __init__(

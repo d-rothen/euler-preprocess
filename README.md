@@ -44,6 +44,8 @@ qualitative review.
 
 | Command | Description |
 |---|---|
+| `euler-preprocess run <name>` | Run any transform by name, built-in or from an installed package ([Your own transforms](#your-own-transforms)) |
+| `euler-preprocess transforms` | List the transforms this installation can run (`--json`: the capability report) |
 | `euler-preprocess fog` | Synthetic fog via the Koschmieder atmospheric scattering model |
 | `euler-preprocess sky-depth` | Override depth values in sky regions with a constant |
 | `euler-preprocess radial` | Convert planar (z-buffer) depth to radial (Euclidean) depth |
@@ -65,7 +67,12 @@ euler-preprocess sky-depth -c configs/sky_depth_dataset_config.json
 euler-preprocess radial    -c configs/radial_dataset_config.json
 euler-preprocess lidar-motion -c configs/lidar_motion_dataset_config.json
 euler-preprocess crop      -c configs/crop_stf_dataset_config.json
+
+euler-preprocess run radial -c configs/radial_dataset_config.json   # same as `radial`
+euler-preprocess run radial -c dataset.json -t other_radial_config.json
 ```
+
+`-t/--transform-config` replaces the dataset config's `transform_config_path`.
 
 ## Dataset Config
 
@@ -90,12 +97,12 @@ loader.
 
 | Field | Description |
 |---|---|
-| `transform_config_path` | Path to the transform-specific config, relative to this file. `fog_config_path` is also accepted. |
+| `transform_config_path` | Path to the transform-specific config, relative to this file. Required unless `--transform-config` is given. |
 | `output_path` | Output root used when no pipeline target overrides it. Optional if `pipeline.output_root` or `pipeline.output_targets[].path` supplies the destination. |
 | `output_slot` | Optional slot selector when `pipeline.output_targets` has several entries. Defaults to `rgb` for `fog` and `depth` for `sky-depth` / `radial`. |
 | `sample` | Optional 0-based dataset index. Only `dataset[sample]` is transformed — useful for small benchmark slices of large datasets. |
 | `samples` | Optional multi-sample selector: a list of indices (`[0, 10, 20]`) or a slice object (`{"start": 0, "stop": 1000, "step": 2, "count": 100}`). `stop` is exclusive, `count` caps the result. With fog `file_ids`, this is a positive integer giving the number of renders per variant. Mutually exclusive with `sample`. |
-| `file_ids` | Fog only. List of file IDs in the joined dataset. Use qualified IDs such as `/scene/camera/frame` where short IDs are ambiguous. See [Repeated Renders for Selected Files](#repeated-renders-for-selected-files). |
+| `file_ids` | For transforms that accept `samples_per_variant` (`fog`); others refuse it. List of file IDs of the source modality in the joined dataset. Use qualified IDs such as `/scene/camera/frame` where short IDs are ambiguous. See [Repeated Renders for Selected Files](#repeated-renders-for-selected-files). |
 | `modalities` | All input modalities. Each value is a path string or an object with `path` and optional `split`. Whether a modality is per-sample or hierarchical is inferred (see below). |
 | `hierarchical_modalities` | Legacy, optional. Same format; entries are pooled with `modalities` and resolved the same way. |
 | `pipeline` | Optional runtime routing block compatible with `euler-inference`. |
@@ -167,6 +174,89 @@ whole dataset.
   `.euler_pipeline/pipeline_outputs.json` in the `euler-inference` manifest shape.
 
 ---
+
+## Your own transforms
+
+A transform is a `Transform` subclass. Ship it in your own package and
+declare it in the suite's `euler.transforms` entry-point group; `pip install`
+is the whole integration, no pull request to euler-preprocess:
+
+```toml
+# your package's pyproject.toml
+[project.entry-points."euler.transforms"]
+scale-depth = "my_lab.transforms:ScaleDepthTransform"
+```
+
+```python
+# my_lab/transforms.py
+from pathlib import Path
+from typing import Any, ClassVar
+
+from euler_preprocess.common.io import load_json
+from euler_preprocess.common.normalize import normalize_depth
+from euler_preprocess.common.transform import Transform
+
+
+class ScaleDepthTransform(Transform):
+    """Multiply depth by a constant factor."""
+
+    REQUIRED_MODALITIES: ClassVar[set[str]] = {"depth"}
+    SOURCE_MODALITY: ClassVar[str] = "depth"   # outputs mirror its files
+    OUTPUT_SLOT: ClassVar[str] = "depth"
+    CONFIG_HINTS: ClassVar[dict[str, dict[str, Any]]] = {
+        "factor": {"type": "number", "default": 2.0, "description": "Depth multiplier."},
+    }
+
+    def __init__(self, config_path: str, out_path: str, output_backend: Any = None) -> None:
+        self.factor = float(load_json(Path(config_path)).get("factor", 2.0))
+        self.output_backend = output_backend
+        self.out_path = Path(out_path)
+
+    def run(self, samples):
+        paths = [
+            self.output_backend.write(
+                sample,
+                normalize_depth(sample["depth"]) * self.factor,
+                default_path=self.out_path / f"{sample['id']}.npy",
+            )
+            for sample in samples
+        ]
+        self.output_backend.finalize()
+        return paths
+```
+
+```bash
+pip install my-lab
+euler-preprocess run scale-depth -c dataset.json
+```
+
+The CLI joins the declared modalities exactly as for the built-ins (`OPTIONAL_MODALITIES`,
+`REQUIRED_HIERARCHICAL_MODALITIES` and `MODALITY_FUNCTIONS` work the same), writes a
+source-backed dataset mirroring `SOURCE_MODALITY`, and passes the optional
+constructor keywords the transform accepts:
+
+| Keyword | Effect |
+|---|---|
+| `output_backends` | receives every slot's backend; required to write auxiliary `OUTPUT_SLOT_SPECS` (otherwise it gets `output_backend`, the primary slot's) |
+| `depth_radial` | receives what the depth's dataset head declares in `radial_depth` |
+| `strict` | honours `--strict`; for other transforms `--strict` is an error |
+| `samples_per_variant` | allows `file_ids` selection; for other transforms `file_ids` is an error |
+
+Built-in transforms are loaded through the same path and checked by the same
+rules (`euler_preprocess.registry.validate_transform`): the source modality is
+one of the required ones, `MODALITY_FUNCTIONS` names only modalities the
+transform takes, auxiliary slots are declared in `OUTPUT_SLOTS`. An installed
+transform that breaks a rule, cannot be imported, takes a built-in name
+(`fog`, `crop`, …: the built-in is used) or is offered by two packages (neither
+is used) is not loaded, and `euler-preprocess transforms` says why;
+`EULER_EXTENSIONS_STRICT=1` makes that an error.
+
+`euler-preprocess transforms --json` prints the `transform_capability_report`
+(1.0): every transform with its provider, required/optional/hierarchical
+modalities, loader functions, output slots, config hints and run options, plus
+the problems. The same report is registered as `euler-preprocess` in the
+suite's `euler.capabilities` group, which `euler-suite report` aggregates and
+euler-view reads per cluster environment.
 
 ## Fog Transform
 

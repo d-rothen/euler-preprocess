@@ -1,14 +1,18 @@
 """CLI entry point for euler-preprocess.
 
 Used both by ``python main.py`` and by the installed ``euler-preprocess`` console
-script.  Supports subcommands: ``fog``, ``sky-depth``, ``radial``, ``lidar-motion``,
-``crop``, ``crop-box`` and ``spatial``.
+script. ``run <name>`` runs any registered transform, built-in or provided by an
+installed package through the ``euler.transforms`` entry-point group (see
+:mod:`euler_preprocess.registry`); the built-in transforms ``fog``,
+``sky-depth``, ``radial`` and ``lidar-motion`` also have their own subcommand.
+``transforms`` lists them. ``crop``, ``crop-box`` and ``spatial`` are commands of
+their own.
 """
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
+import sys
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,6 +20,15 @@ from typing import Any
 from euler_preprocess.common.dataset import build_dataset, declared_radial_depth
 from euler_preprocess.common.logging import get_logger, log_dataset_info
 from euler_preprocess.common.output import prepare_output_backends
+from euler_preprocess.registry import (
+    BUILTIN_TRANSFORMS,
+    COMMANDS,
+    TransformEntry,
+    get_transform,
+    run_options,
+    transform_catalog,
+    transform_problems,
+)
 
 
 def _resolve(path_str: str, config_dir: Path) -> Path:
@@ -152,7 +165,10 @@ def _select_configured_samples(config: dict, dataset, logger):
     return _SelectedSamples(dataset, indices)
 
 
-def _select_fog_file_ids(file_ids: Any, dataset, logger) -> _SelectedSamples:
+def _select_file_ids(
+    file_ids: Any, dataset, logger, source_modality: str = "rgb",
+) -> _SelectedSamples:
+    """Select samples by file ID of *source_modality* (short or qualified)."""
     if not isinstance(file_ids, list) or not file_ids or any(
         not isinstance(file_id, str) or not file_id.strip() for file_id in file_ids
     ):
@@ -163,7 +179,7 @@ def _select_fog_file_ids(file_ids: Any, dataset, logger) -> _SelectedSamples:
     ]
     matches: dict[str, list[int]] = {file_id: [] for file_id in normalized}
     for index in range(len(dataset)):
-        full_id = dataset.sample_full_id(index, "rgb")
+        full_id = dataset.sample_full_id(index, source_modality)
         for key in (full_id, full_id.rsplit("/", 1)[-1]):
             if key in matches:
                 matches[key].append(index)
@@ -182,31 +198,67 @@ def _select_fog_file_ids(file_ids: Any, dataset, logger) -> _SelectedSamples:
     return _SelectedSamples(dataset, indices)
 
 
-def _run_transform(
-    args: argparse.Namespace, transform_class: type, *, allow_file_ids: bool = False,
-) -> int:
-    """Shared logic for all subcommands."""
+def _transform_config_path(
+    config: dict, config_dir: Path, transform_config: str | None,
+) -> Path:
+    if transform_config is not None:
+        return Path(transform_config).resolve()
+    if "transform_config_path" not in config:
+        raise ValueError(
+            "The dataset config has no transform_config_path; set it (relative to "
+            "the dataset config) or pass --transform-config."
+        )
+    return _resolve(config["transform_config_path"], config_dir)
+
+
+def run_transform(
+    transform: str | TransformEntry,
+    config: str | Path,
+    *,
+    transform_config: str | Path | None = None,
+    strict: bool = False,
+) -> list[Path]:
+    """Run a registered transform on the dataset a dataset config describes.
+
+    *transform* is a name from ``euler-preprocess transforms`` (built-in or
+    from an installed package). *transform_config* replaces the dataset
+    config's ``transform_config_path``. The transform receives the optional
+    constructor keywords it accepts (:data:`~euler_preprocess.registry.RUN_OPTIONS`);
+    asking for one it does not accept (``strict``, ``file_ids``) is an error.
+    Returns the paths the transform wrote.
+    """
+    entry = get_transform(transform) if isinstance(transform, str) else transform
+    transform_class = entry.transform_class
+    options = run_options(transform_class)
     logger = get_logger()
 
-    config_path = Path(args.config).resolve()
+    config_path = Path(config).resolve()
     config_dir = config_path.parent
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    # Resolve the transform-specific config path.
-    # Support both ``transform_config_path`` and legacy ``fog_config_path``.
-    transform_config_key = "transform_config_path"
-    if transform_config_key not in config:
-        transform_config_key = "fog_config_path"
-    transform_config_path = _resolve(config[transform_config_key], config_dir)
+    transform_config_path = _transform_config_path(
+        config, config_dir, None if transform_config is None else str(transform_config),
+    )
     # Read the transform config to determine the device (for dataset logging)
     with open(transform_config_path, "r", encoding="utf-8") as f:
         transform_cfg = json.load(f)
-    device = transform_cfg.get("device", "cpu").lower()
+    device = str(transform_cfg.get("device", "cpu")).lower()
     use_gpu = device not in ("cpu",)
 
-    logger.info("Config: %s", args.config)
+    if strict and not options["strict"]:
+        raise ValueError(
+            f"--strict was set, but transform {entry.name!r} has no strict mode."
+        )
+    if "file_ids" in config and not options["samples_per_variant"]:
+        raise ValueError(
+            f"file_ids selection is not supported by transform {entry.name!r}; "
+            "select samples with sample or samples."
+        )
+
+    logger.info("Transform: %s (%s)", entry.name, entry.extension.distribution)
+    logger.info("Config: %s", config_path)
     logger.info("Transform config: %s", transform_config_path)
 
     required_modalities = transform_class.REQUIRED_MODALITIES
@@ -218,14 +270,16 @@ def _run_transform(
         required_modalities,
         required_hierarchical,
         transform_class.MODALITY_FUNCTIONS,
-        optional_modalities=getattr(transform_class, "OPTIONAL_MODALITIES", None),
+        optional_modalities=transform_class.OPTIONAL_MODALITIES,
     )
     repeats = None
-    if allow_file_ids and "file_ids" in config:
+    if "file_ids" in config:
         if "sample" in config:
             raise ValueError("Use either file_ids or sample, not both")
         repeats = _positive_int(config.get("samples", 1), key="samples")
-        samples = _select_fog_file_ids(config["file_ids"], dataset, logger)
+        samples = _select_file_ids(
+            config["file_ids"], dataset, logger, transform_class.SOURCE_MODALITY,
+        )
     else:
         samples = _select_configured_samples(config, dataset, logger)
     output_backends = prepare_output_backends(config, dataset, transform_class)
@@ -237,11 +291,11 @@ def _run_transform(
         **config.get("hierarchical_modalities", {}),
     }
     modality_info: dict[str, dict] = {}
-    for name, entry in raw_modalities.items():
-        if isinstance(entry, str):
-            modality_info[name] = {"path": entry}
+    for name, entry_config in raw_modalities.items():
+        if isinstance(entry_config, str):
+            modality_info[name] = {"path": entry_config}
         else:
-            modality_info[name] = entry
+            modality_info[name] = entry_config
     log_dataset_info(logger, dataset_name, len(samples), modality_info, use_gpu)
     for slot, backend in output_backends.items():
         logger.info("Output path [%s]: %s", slot, backend.root)
@@ -252,19 +306,12 @@ def _run_transform(
     }
     if repeats is not None:
         transform_kwargs["samples_per_variant"] = repeats
-    init_params = inspect.signature(transform_class.__init__).parameters
-    if "output_backends" in init_params:
+    if options["output_backends"]:
         transform_kwargs["output_backends"] = output_backends
     else:
+        # validate_transform guarantees: no auxiliary slots without output_backends.
         transform_kwargs["output_backend"] = primary_backend
-        if len(output_backends) > 1:
-            extra = [s for s in output_backends if s != next(iter(output_backends))]
-            logger.warning(
-                "%s does not accept output_backends; ignoring auxiliary slots: %s",
-                transform_class.__name__,
-                extra,
-            )
-    if "depth_radial" in init_params and "depth" in dataset.modality_paths():
+    if options["depth_radial"] and "depth" in dataset.modality_paths():
         depth_radial, source = declared_radial_depth(dataset, "depth")
         logger.info(
             "Depth: radial_depth=%s (from the %s)",
@@ -272,39 +319,62 @@ def _run_transform(
             source,
         )
         transform_kwargs["depth_radial"] = depth_radial
-    if "strict" in init_params:
-        transform_kwargs["strict"] = bool(getattr(args, "strict", False))
-    elif getattr(args, "strict", False):
-        logger.warning(
-            "--strict was set but %s does not support strict mode; ignoring.",
-            transform_class.__name__,
-        )
-    transform = transform_class(**transform_kwargs)
+    if options["strict"]:
+        transform_kwargs["strict"] = bool(strict)
+    instance = transform_class(**transform_kwargs)
 
-    saved_paths = transform.run(samples)
+    saved_paths = instance.run(samples)
 
     logger.info("Transform complete. Generated %d outputs.", len(saved_paths))
+    return saved_paths
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    try:
+        entry = get_transform(args.transform)
+    except KeyError as exc:
+        print(f"euler-preprocess: error: {exc.args[0]}", file=sys.stderr)
+        return 2
+    run_transform(
+        entry,
+        args.config,
+        transform_config=args.transform_config,
+        strict=args.strict,
+    )
     return 0
 
 
-def _cmd_fog(args: argparse.Namespace) -> int:
-    from euler_preprocess.fog.transform import FogTransform
-    return _run_transform(args, FogTransform, allow_file_ids=True)
+def _describe_entry(entry: TransformEntry) -> list[str]:
+    cls = entry.transform_class
+    origin = "built-in" if entry.builtin else (
+        f"{entry.extension.distribution or 'unknown package'} "
+        f"{entry.extension.version or ''}".strip()
+    )
+    summary = (cls.__doc__ or "").strip().splitlines()
+    lines = [f"{entry.name:<14} {summary[0] if summary else cls.__name__}  [{origin}]"]
+    needs = ", ".join(sorted(cls.REQUIRED_MODALITIES | cls.REQUIRED_HIERARCHICAL_MODALITIES))
+    lines.append(f"{'':<14} requires {needs}")
+    if cls.OPTIONAL_MODALITIES:
+        lines.append(f"{'':<14} optional {', '.join(sorted(cls.OPTIONAL_MODALITIES))}")
+    slots = list(cls.OUTPUT_SLOTS) or [cls.OUTPUT_SLOT or cls.SOURCE_MODALITY]
+    lines.append(f"{'':<14} writes   {', '.join(slots)}")
+    return lines
 
 
-def _cmd_sky_depth(args: argparse.Namespace) -> int:
-    from euler_preprocess.sky_depth.transform import SkyDepthTransform
-    return _run_transform(args, SkyDepthTransform)
+def _cmd_transforms(args: argparse.Namespace) -> int:
+    if args.json:
+        from euler_preprocess.capabilities import transform_capability_report
 
-
-def _cmd_radial(args: argparse.Namespace) -> int:
-    from euler_preprocess.radial.transform import RadialTransform
-    return _run_transform(args, RadialTransform)
-
-
-def _cmd_lidar_motion(args: argparse.Namespace) -> int:
-    from euler_preprocess.lidar_motion.transform import LidarMotionTransform
-    return _run_transform(args, LidarMotionTransform)
+        print(json.dumps(transform_capability_report(), indent=2))
+        return 0
+    for entry in transform_catalog().entries.values():
+        print("\n".join(_describe_entry(entry)))
+    problems = transform_problems()
+    if problems:
+        print(f"\n{len(problems)} installed transform(s) not loaded:")
+        for problem in problems:
+            print(f"  [{problem.code}] {problem.message}")
+    return 0
 
 
 def _cmd_crop(args: argparse.Namespace) -> int:
@@ -347,15 +417,21 @@ def _cmd_spatial(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+_BUILTIN_HELP = {
+    "fog": "Apply synthetic fog to RGB images.",
+    "sky-depth": "Override sky-region depth values.",
+    "radial": "Convert planar (z-buffer) depth to radial (Euclidean) depth.",
+    "lidar-motion": "Compensate scanning-lidar points for ego motion during the sweep.",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="euler-preprocess",
         description="Preprocessing transforms for RGB+depth datasets.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # Shared flags available to every subcommand.  Currently only honoured by
-    # subcommands whose transforms accept a ``strict`` argument (see
-    # ``_run_transform``); others log a warning and ignore it.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--config", "-c", type=str, required=True,
@@ -364,42 +440,42 @@ def parse_args() -> argparse.Namespace:
     common.add_argument(
         "--strict", action="store_true",
         help="Abort early if leading-sample sanity checks detect suspicious "
-             "inputs (e.g. 0%% or ~100%% sky pixels, wrong mask shape). "
-             "Currently honoured by: sky-depth.",
+             "inputs (e.g. 0%% or ~100%% sky pixels, wrong mask shape). Only "
+             "for transforms with a strict mode (sky-depth); others refuse it.",
+    )
+    transform_options = argparse.ArgumentParser(add_help=False)
+    transform_options.add_argument(
+        "--transform-config", "-t", type=str, default=None,
+        help="Path to the transform config JSON file; replaces the dataset "
+             "config's transform_config_path.",
     )
 
-    fog_parser = subparsers.add_parser(
-        "fog", parents=[common], help="Apply synthetic fog to RGB images.",
+    run_parser = subparsers.add_parser(
+        "run", parents=[common, transform_options], help=COMMANDS["run"],
+        description="Run a transform by name: a built-in one or one an installed "
+                    "package provides (euler.transforms entry points). "
+                    "`euler-preprocess transforms` lists them.",
     )
-    fog_parser.set_defaults(func=_cmd_fog)
+    run_parser.add_argument("transform", metavar="NAME", help="Transform name.")
+    run_parser.set_defaults(func=_cmd_run)
 
-    sky_depth_parser = subparsers.add_parser(
-        "sky-depth", parents=[common], help="Override sky-region depth values.",
-    )
-    sky_depth_parser.set_defaults(func=_cmd_sky_depth)
+    for name in BUILTIN_TRANSFORMS:
+        builtin_parser = subparsers.add_parser(
+            name, parents=[common, transform_options], help=_BUILTIN_HELP[name],
+        )
+        builtin_parser.set_defaults(func=_cmd_run, transform=name)
 
-    radial_parser = subparsers.add_parser(
-        "radial", parents=[common],
-        help="Convert planar (z-buffer) depth to radial (Euclidean) depth.",
+    transforms_parser = subparsers.add_parser("transforms", help=COMMANDS["transforms"])
+    transforms_parser.add_argument(
+        "--json", action="store_true",
+        help="Print the transform_capability_report (what euler-view reads).",
     )
-    radial_parser.set_defaults(func=_cmd_radial)
+    transforms_parser.set_defaults(func=_cmd_transforms)
 
-    lidar_motion_parser = subparsers.add_parser(
-        "lidar-motion", parents=[common],
-        help="Compensate scanning-lidar points for ego motion during the sweep.",
-    )
-    lidar_motion_parser.set_defaults(func=_cmd_lidar_motion)
-
-    crop_parser = subparsers.add_parser(
-        "crop", parents=[common],
-        help="Crop RGB, depth and calibration coherently (K' = C K; lidar and extrinsics unchanged).",
-    )
+    crop_parser = subparsers.add_parser("crop", parents=[common], help=COMMANDS["crop"])
     crop_parser.set_defaults(func=_cmd_crop)
 
-    crop_box_parser = subparsers.add_parser(
-        "crop-box",
-        help="Print the pixel box a crop config resolves to, and the matching spatial preprocessing block.",
-    )
+    crop_box_parser = subparsers.add_parser("crop-box", help=COMMANDS["crop-box"])
     crop_box_parser.add_argument(
         "--config", "-c", type=str, required=True, help="Path to the crop config JSON file.",
     )
@@ -410,17 +486,16 @@ def parse_args() -> argparse.Namespace:
     crop_box_parser.set_defaults(func=_cmd_crop_box)
 
     spatial_parser = subparsers.add_parser(
-        "spatial", parents=[common], help="Export deterministic crop/resize with verified execution receipts.",
+        "spatial", parents=[common], help=COMMANDS["spatial"],
     )
     spatial_parser.set_defaults(func=_cmd_spatial)
+    return parser
 
-    args = parser.parse_args()
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if not hasattr(args, "func"):
         parser.print_help()
-        return parser.parse_args(["--help"])
-    return args
-
-
-def main() -> int:
-    args = parse_args()
+        return 2
     return args.func(args)

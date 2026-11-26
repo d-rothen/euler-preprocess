@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 
@@ -14,7 +13,7 @@ from euler_loading import Modality, MultiModalDataset
 from euler_loading.loaders.cpu.generic import write_intrinsics
 from euler_loading.loaders.cpu.generic_dense_depth import write_depth
 
-from euler_preprocess.cli import _run_transform
+from euler_preprocess.cli import run_transform
 from euler_preprocess.common.dataset import build_dataset
 from euler_preprocess.common.intrinsics import extract_intrinsics, planar_to_radial_depth
 from euler_preprocess.common.normalize import normalize_depth
@@ -180,7 +179,7 @@ def test_radial_cli_infers_intrinsics_role(tmp_path, layout):
     )
     source = build_dataset(json.loads(config_path.read_text()), {"depth"})
 
-    assert _run_transform(argparse.Namespace(config=str(config_path)), RadialTransform) == 0
+    assert run_transform("radial", config_path)
 
     output = MultiModalDataset({"depth": Modality(str(tmp_path / "radial_depth"))})
     assert len(output) == len(source) == len(FRAMES)
